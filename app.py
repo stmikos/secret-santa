@@ -6,6 +6,8 @@ import logging
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, List, Tuple, Optional
 
 import asyncpg
 from fastapi import FastAPI, Request, HTTPException
@@ -21,11 +23,13 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
+from aiogram.exceptions import TelegramAPIError
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("secret-santa")
 
+# -------- ENV --------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 BASE_URL = os.getenv("BASE_URL", "")
@@ -38,10 +42,12 @@ if not BOT_TOKEN:
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set")
 
+# -------- Globals --------
 bot = Bot(BOT_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher(storage=MemoryStorage())
 app = FastAPI()
 DB_POOL: asyncpg.Pool = None
+logger = logging.getLogger(__name__)
 
 MSG_WELCOME = (
     "🎅 Привет! Я — бот Тайный Санта.\n"
@@ -134,21 +140,28 @@ async def do_cleanup(m: Message, state):
             logger.debug("Skip delete_message %s: %s", mid, e)
     await state.update_data(cleanup_ids=[])
 
-async def db() -> asyncpg.Connection:
-    return await DB_POOL.acquire()
+@asynccontextmanager
+async def db() -> AsyncIterator[asyncpg.Connection]:
+    """Асинхронный контекстный менеджер соединения с БД.
+
+    Пример:
+        async with db() as con:
+            await con.fetch("select 1")
+    """
+    if DB_POOL is None:
+        raise RuntimeError("Database pool is not initialized")
+    async with DB_POOL.acquire() as con:
+        yield con
 
 async def fetchrow(q, *a):
-    con = await db()
-    try:
-        return await con.fetchrow(q, *a)
+    async with db() as con:
+           return await con.fetchrow(q, *a)
     except Exception as e:
         logger.exception("DB fetchrow failed: %s | query=%s", e, q); raise
-    finally:
-        await DB_POOL.release(con)
 
 async def fetch(q, *a):
-    con = await db()
-    try:
+    async with db() as con:
+    
         return await con.fetch(q, *a)
     except Exception as e:
         logger.exception("DB fetch failed: %s | query=%s", e, q); raise
@@ -156,14 +169,12 @@ async def fetch(q, *a):
         await DB_POOL.release(con)
 
 async def execute(q, *a):
-    con = await db()
-    try:
+    async with db() as con:
+    
         return await con.execute(q, *a)
     except Exception as e:
         logger.exception("DB execute failed: %s | query=%s", e, q); raise
-    finally:
-        await DB_POOL.release(con)
-
+    
 @dataclass
 class DrawResult:
     pairs: Optional[List[Tuple[int, int]]]
@@ -171,6 +182,8 @@ class DrawResult:
     reason: Optional[str] = None
 
 def draw_pairs(user_ids: List[int], forbidden: List[Tuple[int, int]], max_attempts: int = 500) -> DrawResult:
+    """Подбирает пары без самосовпадений, запретных связок и 2-циклов."""
+    
     n = len(user_ids)
     if n < 2:
         return DrawResult(None, 0, "Недостаточно участников (<2)")
@@ -402,8 +415,14 @@ async def cb_room_draw(c: CallbackQuery):
             addr = "📦 Доставка: " + json.dumps(rec["address_json"], ensure_ascii=False)
         try:
             await bot.send_message(g, MSG_YOU_GIFT_TO.format(name=rec["name"], wishlist=wl, anti=anti, addr=addr))
-        except Exception as e:
-            logging.warning("Failed to notify %s: %s", g, e)
+        except TelegramAPIError as exc:
+            logger.warning(
+                "Failed to send draw notification in room %s for giver %s -> receiver %s: %s",
+                room_id,
+                g,
+                rcv,
+                exc,
+            )
     cnt_row = await fetchrow("select count(*) as c from draws where room_id=$1", room_id)
     has_prev = (cnt_row["c"] or 0) - 1 > 0
     await c.message.edit_text(MSG_DRAW_DONE, reply_markup=room_inline_kb(room_id, owner=True, has_prev_draw=has_prev))
