@@ -1,23 +1,11 @@
 services:
-- type: web
-name: secret-santa-bot
-env: python
-plan: free
-buildCommand: "python -m pip install -U pip && pip install -r requirements.txt"
-startCommand: "python app.py"
-envVars:
-- key: BOT_TOKEN
-sync: false
-- key: DATABASE_URL
-value: sqlite+aiosqlite:///./santa.db
-- key: MAX_ROOMS_PER_OWNER
-value: "5"
-- key: MAX_PARTICIPANTS_PER_ROOM
-value: "200"
-- key: MAX_HINTS_PER_DAY
-value: "3"
-- key: REMINDER_HOUR
-value: "10"
-- key: WEBHOOK_URL
-sync: false
-healthCheckPath: /health
+  - type: web
+    name: secret-santa-menu
+    env: python
+    plan: free
+    buildCommand: "python -m pip install -U pip && pip install -r requirements.txt"
+    startCommand: "python app.py"
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+    healthCheckPath: /health
