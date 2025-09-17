@@ -1,26 +1,23 @@
 services:
-  - type: web
-    name: secret-santa-bot-mvp
-    env: python
-    plan: free
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.6
-      - key: BOT_TOKEN
-        sync: false
-      - key: DATABASE_URL
-        sync: false
-      - key: BASE_URL
-        sync: false
-      - key: WEBHOOK_SECRET
-        generateValue: true
-        key: MAX_ROOMS
-        value: "5"
-      - key: REMINDER_HOUR
-        value: "10"
-      - key: WEBHOOK_URL
-        sync: false
-    healthCheckPath: /webhook
-
+- type: web
+name: secret-santa-bot
+env: python
+plan: free
+buildCommand: "python -m pip install -U pip && pip install -r requirements.txt"
+startCommand: "python app.py"
+envVars:
+- key: BOT_TOKEN
+sync: false
+- key: DATABASE_URL
+value: sqlite+aiosqlite:///./santa.db
+- key: MAX_ROOMS_PER_OWNER
+value: "5"
+- key: MAX_PARTICIPANTS_PER_ROOM
+value: "200"
+- key: MAX_HINTS_PER_DAY
+value: "3"
+- key: REMINDER_HOUR
+value: "10"
+- key: WEBHOOK_URL
+sync: false
+healthCheckPath: /webhook
