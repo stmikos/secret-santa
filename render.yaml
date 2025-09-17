@@ -21,3 +21,4 @@ value: "10"
 - key: WEBHOOK_URL
 sync: false
 healthCheckPath: /webhook
+healthCheckPath: /health
