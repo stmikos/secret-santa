@@ -1,11 +1,9 @@
-# ===================== app.py =====================
 import asyncio
 import os
 import random
 import string
 import io
 import csv
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Tuple, Optional, Set, Dict
 
@@ -14,15 +12,13 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup,
-)
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
 from aiogram.types.input_file import BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String as SAString, DateTime, ForeignKey, Integer, Boolean, UniqueConstraint, select, func, JSON
+from sqlalchemy import String as SAString, DateTime, ForeignKey, Integer, Boolean, UniqueConstraint, select, func
 
 # ---------- Config ----------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -30,7 +26,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./santa.db")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g. https://your-app.onrender.com
 PORT = int(os.environ.get("PORT", "8000"))
 REMINDER_HOUR = int(os.environ.get("REMINDER_HOUR", "10"))
-MAX_ROOMS_PER_OWNER = int(os.environ.get("MAX_ROOMS_PER_OWNER", "5"))  # корпоративный лимит на владельца
+MAX_ROOMS_PER_OWNER = int(os.environ.get("MAX_ROOMS_PER_OWNER", "5"))
 MAX_PARTICIPANTS_PER_ROOM = int(os.environ.get("MAX_PARTICIPANTS_PER_ROOM", "200"))
 MAX_HINTS_PER_DAY = int(os.environ.get("MAX_HINTS_PER_DAY", "3"))
 
@@ -49,11 +45,11 @@ class Room(Base):
     title: Mapped[str] = mapped_column(default="Secret Santa")
     budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     deadline_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
-    # Challenge rules (для веселья)
+    # Challenge rules
     rule_letter: Mapped[Optional[str]] = mapped_column(SAString(1), nullable=True)
     rule_amount_exact: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     rule_amount_max: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    # Corporate mode
+    # Corporate
     corporate: Mapped[bool] = mapped_column(Boolean, default=False)
     org_name: Mapped[Optional[str]] = mapped_column(SAString(128), nullable=True)
 
@@ -113,7 +109,6 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
 # ---------- Utils ----------
-
 def gen_code(n: int = 6) -> str:
     import secrets
     alphabet = string.ascii_uppercase + string.digits
@@ -124,9 +119,8 @@ async def log(event: str, user_id: Optional[int] = None, room_code: Optional[str
         s.add(AuditLog(user_id=user_id, room_code=room_code, event=event, data_json=data))
         await s.commit()
 
-# Backtracking derangement with constraints
-
 def draw_pairs(ids: List[int], forbidden: Set[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """Derangement with constraints: no self, no two-cycles, respect blacklist."""
     n = len(ids)
     if n < 2:
         raise ValueError("At least 2 participants")
@@ -140,14 +134,13 @@ def draw_pairs(ids: List[int], forbidden: Set[Tuple[int, int]]) -> List[Tuple[in
         giver = ids[i]
         random.shuffle(receivers)
         for r in receivers:
-            if r == giver:
+            if r == giver:  # no self
                 continue
             if (giver, r) in forbidden:
                 continue
-            if r in assigned.values():
+            if r in assigned.values():  # already taken
                 continue
-            # prevent two-cycles
-            if r in assigned and assigned.get(r) == giver:
+            if r in assigned and assigned.get(r) == giver:  # prevent two-cycle
                 continue
             assigned[giver] = r
             if backtrack(i + 1):
@@ -164,6 +157,7 @@ def draw_pairs(ids: List[int], forbidden: Set[Tuple[int, int]]) -> List[Tuple[in
     return list(assigned.items())
 
 async def send_menu(msg: Message | CallbackQuery, text: str, kb: InlineKeyboardMarkup):
+    """Single-message UX: edit if possible; else send and delete previous."""
     chat_id = msg.message.chat.id if isinstance(msg, CallbackQuery) else msg.chat.id
     message_id = msg.message.message_id if isinstance(msg, CallbackQuery) else msg.message_id
     try:
@@ -210,7 +204,6 @@ bot = Bot(BOT_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
 # ---------- Keyboards ----------
-
 def main_kb(room_code: Optional[str] = None, is_owner: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     if not room_code:
@@ -269,8 +262,7 @@ async def cb_room_new(cq: CallbackQuery):
     kb = InlineKeyboardBuilder()
     kb.button(text="🔗 Ссылка для друзей", url=link)
     kb.button(text="➡️ В комнату", callback_data=f"room_open:{code}")
-    text = f"Комната создана: <code>{code}</code>
-Зови друзей по ссылке."
+    text = f"Комната создана: <code>{code}</code>\nЗови друзей по ссылке."
     await send_menu(cq, text, kb.as_markup())
 
 @dp.callback_query(F.data.startswith("room_open:"))
@@ -291,16 +283,16 @@ async def enter_room_menu(msg: Message | CallbackQuery, code: str):
             kb.button(text="✅ Присоединиться", callback_data=f"join:{code}")
             kb.button(text="↩️ Назад", callback_data="home")
             rules = []
-            if room.rule_letter: rules.append(f"буква {room.rule_letter}")
-            if room.rule_amount_exact: rules.append(f"сумма ровно {room.rule_amount_exact}₽")
-            if room.rule_amount_max: rules.append(f"сумма до {room.rule_amount_max}₽")
+            if room.rule_letter:
+                rules.append(f"буква {room.rule_letter}")
+            if room.rule_amount_exact:
+                rules.append(f"сумма ровно {room.rule_amount_exact}₽")
+            if room.rule_amount_max:
+                rules.append(f"сумма до {room.rule_amount_max}₽")
             info = (
-                f"Комната <b>{room.title}</b> (<code>{room.code}</code>)
-" 
-                f"Бюджет: {room.budget or '—'} | Дедлайн: {room.deadline_at.date() if room.deadline_at else '—'}
-"
-                f"Правила: {', '.join(rules) if rules else '—'}
-"
+                f"Комната <b>{room.title}</b> (<code>{room.code}</code>)\n"
+                f"Бюджет: {room.budget or '—'} | Дедлайн: {room.deadline_at.date() if room.deadline_at else '—'}\n"
+                f"Правила: {', '.join(rules) if rules else '—'}\n"
                 f"Режим: {'Корпоративный' if room.corporate else 'Обычный'}"
             )
             await send_menu(msg, info, kb.as_markup())
@@ -359,10 +351,8 @@ async def cb_participants(cq: CallbackQuery):
             return
         rows = (await s.execute(select(Participant).where(Participant.room_id == room.id).order_by(Participant.joined_at))).scalars().all()
     lines = [f"{i+1}. {p.name}" for i, p in enumerate(rows)]
-    names = "
-".join(lines) or "пока пусто"
-    await send_menu(cq, f"Участники ({len(rows)}):
-{names}", main_kb(room.code, cq.from_user.id == room.owner_id))
+    names = "\n".join(lines) or "пока пусто"
+    await send_menu(cq, f"Участники ({len(rows)}):\n{names}", main_kb(room.code, cq.from_user.id == room.owner_id))
 
 @dp.callback_query(F.data.startswith("me_edit:"))
 async def cb_me_edit(cq: CallbackQuery, state: FSMContext):
@@ -393,9 +383,9 @@ async def cb_me_target(cq: CallbackQuery):
 # ----- Anonymous hints -----
 @dp.callback_query(F.data.startswith("hint_send:"))
 async def cb_hint_send(cq: CallbackQuery, state: FSMContext):
+    from sqlalchemy import select
     code = cq.data.split(":", 1)[1]
     await state.update_data(room_code=code)
-    # check assignment exists
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
         me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == cq.from_user.id))).scalar_one_or_none()
@@ -406,9 +396,9 @@ async def cb_hint_send(cq: CallbackQuery, state: FSMContext):
         if not pair:
             await cq.answer("Жеребьёвки ещё не было.", show_alert=True)
             return
-        # rate limit
         since = datetime.utcnow() - timedelta(days=1)
-        cnt = (await s.execute(select(func.count()).select_from(Hint).where(Hint.room_id == room.id, Hint.sender_participant_id == me.id, Hint.created_at >= since))).scalar()
+        from sqlalchemy import func as sfunc
+        cnt = (await s.execute(select(sfunc.count()).select_from(Hint).where(Hint.room_id == room.id, Hint.sender_participant_id == me.id, Hint.created_at >= since))).scalar()
         if cnt >= MAX_HINTS_PER_DAY:
             await cq.answer("Лимит подсказок на сегодня исчерпан", show_alert=True)
             return
@@ -430,7 +420,6 @@ async def on_hint_text(m: Message, state: FSMContext):
         recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
         s.add(Hint(room_id=room.id, sender_participant_id=me.id, receiver_participant_id=recv.id, text=text[:512]))
         await s.commit()
-    # deliver anonymously
     try:
         await bot.send_message(recv.user_id, f"🕵️ Тайная подсказка: {text}")
     except Exception:
@@ -612,16 +601,12 @@ async def cb_forbid_ui(cq: CallbackQuery, state: FSMContext):
         await send_menu(cq, "Список пуст.", settings_kb(code))
         return
     id_to_idx = {p.id: i+1 for i, p in enumerate(parts)}
-    ftext = "
-".join(f"{id_to_idx[fp.giver_id]}→{id_to_idx[fp.receiver_id]}" for fp in forb) or "—"
+    ftext = "\n".join(f"{id_to_idx[fp.giver_id]}→{id_to_idx[fp.receiver_id]}" for fp in forb) or "—"
     txt = (
-        "Чёрный список пар (giver→receiver):
-" +
-        f"Текущие: {ftext}
-
-" +
-        "Отправь два номера через пробел, напр.: <code>1 3</code> (1 не дарит 3).
-Отправь 0 0 чтобы очистить всё."
+        "Чёрный список пар (giver→receiver):\n"
+        f"Текущие: {ftext}\n\n"
+        "Отправь два номера через пробел, напр.: <code>1 3</code> (1 не дарит 3).\n"
+        "Отправь 0 0 чтобы очистить всё."
     )
     await state.update_data(room_code=code)
     await state.set_state(AddForbidden.waiting)
@@ -696,19 +681,23 @@ async def cb_room_draw(cq: CallbackQuery):
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
         pairs = (await s.execute(select(Pair).where(Pair.room_id == room.id))).scalars().all()
-        # gather rules text
         rules = []
-        if room.rule_letter: rules.append(f"буква {room.rule_letter}")
-        if room.rule_amount_exact: rules.append(f"сумма ровно {room.rule_amount_exact}₽")
-        if room.rule_amount_max: rules.append(f"сумма до {room.rule_amount_max}₽")
-        rules_text = ("
-Правило: " + ", ".join(rules)) if rules else ""
+        if room.rule_letter:
+            rules.append(f"буква {room.rule_letter}")
+        if room.rule_amount_exact:
+            rules.append(f"сумма ровно {room.rule_amount_exact}₽")
+        if room.rule_amount_max:
+            rules.append(f"сумма до {room.rule_amount_max}₽")
+        rules_text = ("\nПравило: " + ", ".join(rules)) if rules else ""
         for pair in pairs:
             giver = (await s.execute(select(Participant).where(Participant.id == pair.giver_id))).scalar_one()
             recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
             try:
-                await bot.send_message(giver.user_id, f"🎄 Твой получатель: <b>{recv.name}</b>{rules_text}
-Хотелки: {recv.wishes or 'не указаны'}")
+                await bot.send_message(
+                    giver.user_id,
+                    f"🎄 Твой получатель: <b>{recv.name}</b>{rules_text}\n"
+                    f"Хотелки: {recv.wishes or 'не указаны'}"
+                )
             except Exception:
                 pass
 
@@ -737,14 +726,14 @@ async def cb_export_csv(cq: CallbackQuery):
     await bot.send_document(cq.from_user.id, BufferedInputFile(data, filename=f"secret_santa_{code}.csv"))
     await cq.answer("Отправил CSV в личку")
 
-# ---------- Reminders (simple hourly check) ----------
+# ---------- Reminders ----------
 async def reminder_loop():
     await asyncio.sleep(5)
     while True:
         now = datetime.utcnow()
         if now.minute == 0:  # hourly
             async with Session() as s:
-                rooms = (await s.execute(select(Room).where(Room.drawn == True))).scalars().all()
+                rooms = (await s.execute(select(Room).where(Room.drawn == True))).scalars().all()  # noqa: E712
                 for room in rooms:
                     if room.deadline_at and (room.deadline_at - now) <= timedelta(days=7):
                         parts = (await s.execute(select(Participant).where(Participant.room_id == room.id))).scalars().all()
