@@ -773,8 +773,25 @@ async def main():
         while True:
             await asyncio.sleep(3600)
     else:
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+  
+       await bot.delete_webhook(drop_pending_updates=True)
+
+    app = web.Application()
+    app.router.add_get("/health", lambda request: web.Response(text="ok"))
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
+    await site.start()
+    print(f"Polling + health server on :{PORT}/health")
+
+    # запускаем polling параллельно
+    poll_task = asyncio.create_task(
+        dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    )
+
+    # ждём завершения polling (HTTP остаётся запущенным)
+    await poll_task
 
 if __name__ == "__main__":
     try:
