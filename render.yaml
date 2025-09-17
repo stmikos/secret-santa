@@ -16,4 +16,11 @@ services:
         sync: false
       - key: WEBHOOK_SECRET
         generateValue: true
+        key: MAX_ROOMS
+        value: "5"
+      - key: REMINDER_HOUR
+        value: "10"
+      - key: WEBHOOK_URL
+        sync: false
+    healthCheckPath: /webhook
 
