@@ -1,3 +1,7 @@
+# app.py
+# Secret Santa Bot — полный рабочий файл
+# Aiogram 3.7+, Python 3.13
+
 import asyncio
 import os
 import random
@@ -79,7 +83,8 @@ PRIVACY_TEXT = (
 # =======================
 # DB models
 # =======================
-class Base(DeclarativeBase): ...
+class Base(DeclarativeBase):
+    pass
 
 class Room(Base):
     __tablename__ = "rooms"
@@ -178,54 +183,6 @@ async def init_db():
 # =======================
 # Utils
 # =======================
-def _as_aware_utc(dt):
-    """Приводим datetime к UTC-aware (без миграций БД)."""
-    if dt is None:
-        return None
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
-
-async def acquire_runtime_lock(ttl_seconds: int = 600) -> bool:
-    """
-    Эксклюзивный лок на polling с TTL, чтобы не залипал.
-    Возвращает True, если лок наш; False — если уже удерживается другим процессом.
-    """
-    h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
-    now = datetime.now(UTC)                 # aware
-    ttl_ago = now - timedelta(seconds=ttl_seconds)
-
-    async with Session() as s:
-        existing = (await s.execute(
-            select(RuntimeLock).where(RuntimeLock.bot_token_hash == h)
-        )).scalar_one_or_none()
-
-        if existing:
-            started_at = _as_aware_utc(existing.started_at)
-            if started_at < ttl_ago:
-                # Протухший лок — удаляем и берём новый
-                await s.delete(existing)
-                await s.commit()
-            else:
-                return False
-
-        s.add(RuntimeLock(bot_token_hash=h, started_at=now))
-        try:
-            await s.commit()
-            return True
-        except IntegrityError:
-            await s.rollback()
-            return False
-
-async def release_runtime_lock():
-    """Безопасно снимаем лок (если есть)."""
-    h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
-    async with Session() as s:
-        row = (await s.execute(
-            select(RuntimeLock).where(RuntimeLock.bot_token_hash == h)
-        )).scalar_one_or_none()
-        if row:
-            await s.delete(row)
-            await s.commit()
-    
 def gen_code(n: int = 6) -> str:
     import secrets
     alphabet = string.ascii_uppercase + string.digits
@@ -250,11 +207,15 @@ def draw_pairs(ids: List[int], forbidden: Set[Tuple[int, int]]) -> List[Tuple[in
         giver = ids[i]
         random.shuffle(receivers)
         for r in receivers:
-            if r == giver: continue
-            if (giver, r) in forbidden: continue
-            if r in assigned.values(): continue
+            if r == giver:
+                continue
+            if (giver, r) in forbidden:
+                continue
+            if r in assigned.values():
+                continue
             assigned[giver] = r
-            if backtrack(i + 1): return True
+            if backtrack(i + 1):
+                return True
             assigned.pop(giver, None)
         return False
 
@@ -268,9 +229,12 @@ def draw_pairs(ids: List[int], forbidden: Set[Tuple[int, int]]) -> List[Tuple[in
 
 def make_rules_text(room: Room) -> str:
     rules = []
-    if room.rule_letter: rules.append(f"• Подарок на букву: <b>{room.rule_letter}</b>")
-    if room.rule_amount_exact: rules.append(f"• Сумма ровно: <b>{room.rule_amount_exact}₽</b>")
-    if room.rule_amount_max: rules.append(f"• Сумма максимум: <b>{room.rule_amount_max}₽</b>")
+    if room.rule_letter:
+        rules.append(f"• Подарок на букву: <b>{room.rule_letter}</b>")
+    if room.rule_amount_exact:
+        rules.append(f"• Сумма ровно: <b>{room.rule_amount_exact}₽</b>")
+    if room.rule_amount_max:
+        rules.append(f"• Сумма максимум: <b>{room.rule_amount_max}₽</b>")
     basics = (
         "Общие правила:\n"
         "• Не раскрывай, кому даришь, до обмена 🎅\n"
@@ -284,13 +248,16 @@ def make_rules_text(room: Room) -> str:
 
 def wishes_to_query(wishes: str, budget_max: Optional[int], letter: Optional[str]) -> str:
     parts = [wishes or ""]
-    if budget_max: parts.append(f"до {budget_max} руб")
-    if letter: parts.append(f"на букву {letter}")
+    if budget_max:
+        parts.append(f"до {budget_max} руб")
+    if letter:
+        parts.append(f"на букву {letter}")
     return ", ".join([p for p in parts if p]) or "подарок сюрприз"
 
 def mk_aff_url(marketplace: str, query: str) -> Optional[str]:
     tpl = AFF_TEMPLATES.get(marketplace)
-    if not tpl: return None
+    if not tpl:
+        return None
     q = urllib.parse.quote_plus(query.strip())
     return tpl.replace("{q}", q)
 
@@ -299,39 +266,26 @@ async def is_premium(user_id: int) -> bool:
         rec = (await s.execute(select(Premium).where(Premium.user_id == user_id))).scalar_one_or_none()
     return bool(rec and rec.until > datetime.now(UTC))
 
-# ----- runtime lock with TTL -----
+# ----- runtime lock with TTL (без смешения tz-aware/naive) -----
+def _as_aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
 async def acquire_runtime_lock(ttl_seconds: int = 600) -> bool:
-    """Эксклюзивный лок на polling. TTL защищает от залипания после падения процесса."""
     h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
-    now = datetime.now(UTC)
-    
-    # aware
-    
+    now = datetime.now(UTC)  # aware
     ttl_ago = now - timedelta(seconds=ttl_seconds)
-   
-    # aware
-
     async with Session() as s:
-        existing = (await s.execute(
-            select(RuntimeLock).where(RuntimeLock.bot_token_hash == h)
-        )).scalar_one_or_none()
-
+        existing = (await s.execute(select(RuntimeLock).where(RuntimeLock.bot_token_hash == h))).scalar_one_or_none()
         if existing:
             started_at = _as_aware_utc(existing.started_at)
-            
-            # привели к aware UTC
-            
-            if started_at < ttl_ago:
-                
-                # протухший лок — снимаем
-                
+            if started_at and started_at < ttl_ago:
                 await s.delete(existing)
                 await s.commit()
             else:
                 return False
-       
-        # пробуем захватить
-        s.add(RuntimeLock(bot_token_hash=h, started_at=now))  # пишем aware-дату
+        s.add(RuntimeLock(bot_token_hash=h, started_at=now))
         try:
             await s.commit()
             return True
@@ -339,24 +293,37 @@ async def acquire_runtime_lock(ttl_seconds: int = 600) -> bool:
             await s.rollback()
             return False
 
+async def release_runtime_lock():
+    h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
+    async with Session() as s:
+        row = (await s.execute(select(RuntimeLock).where(RuntimeLock.bot_token_hash == h))).scalar_one_or_none()
+        if row:
+            await s.delete(row)
+            await s.commit()
+
+# =======================
 # Single-message UX (no piling)
 # =======================
 _last_bot_msg: Dict[int, int] = {}  # chat_id -> message_id
 
 async def send_single(m: Message | CallbackQuery, text: str, reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None):
     chat_id = m.message.chat.id if isinstance(m, CallbackQuery) else m.chat.id
-    bot_obj = m.bot if isinstance(m, CallbackQuery) else m.bot
+    bot_obj = m.bot
     prev_id = _last_bot_msg.get(chat_id)
     if isinstance(m, CallbackQuery):
         sent = await m.message.answer(text, reply_markup=reply_markup)
-        try: await m.answer()
-        except Exception: pass
+        try:
+            await m.answer()
+        except Exception:
+            pass
     else:
         sent = await m.answer(text, reply_markup=reply_markup)
     _last_bot_msg[chat_id] = sent.message_id
     if prev_id:
-        try: await bot_obj.delete_message(chat_id, prev_id)
-        except Exception: pass
+        try:
+            await bot_obj.delete_message(chat_id, prev_id)
+        except Exception:
+            pass
     return sent
 
 async def send_menu(m: Message | CallbackQuery, text: str, kb: InlineKeyboardMarkup):
@@ -368,13 +335,20 @@ async def send_menu(m: Message | CallbackQuery, text: str, kb: InlineKeyboardMar
 class Join(StatesGroup):
     name = State()
     wishes = State()
-class SetBudget(StatesGroup): waiting = State()
-class SetDeadline(StatesGroup): waiting = State()
-class AddForbidden(StatesGroup): waiting = State()
-class SetRuleLetter(StatesGroup): waiting = State()
-class SetRuleExact(StatesGroup): waiting = State()
-class SetRuleMax(StatesGroup): waiting = State()
-class SendHint(StatesGroup): waiting_text = State()
+class SetBudget(StatesGroup): 
+    waiting = State()
+class SetDeadline(StatesGroup): 
+    waiting = State()
+class AddForbidden(StatesGroup): 
+    waiting = State()
+class SetRuleLetter(StatesGroup): 
+    waiting = State()
+class SetRuleExact(StatesGroup): 
+    waiting = State()
+class SetRuleMax(StatesGroup): 
+    waiting = State()
+class SendHint(StatesGroup): 
+    waiting_text = State()
 
 # =======================
 # Bot setup
@@ -436,7 +410,8 @@ async def get_user_active_room(user_id: int) -> Optional[Room]:
         p = (await s.execute(
             select(Participant).where(Participant.user_id == user_id).order_by(Participant.joined_at.desc()).limit(1)
         )).scalar_one_or_none()
-        if not p: return None
+        if not p:
+            return None
         return (await s.execute(select(Room).where(Room.id == p.room_id))).scalar_one_or_none()
 
 async def show_main_menu(m: Message | CallbackQuery):
@@ -471,7 +446,7 @@ async def re_prompt_for_state(m: Message, state: FSMContext):
         await show_main_menu(m)
 
 # =======================
-# Global return & safety (работают в любом состоянии)
+# Global return & safety (в любом состоянии)
 # =======================
 @dp.message(StateFilter("*"), F.text.in_({"🏠 Меню", "⬅️ Назад", "Отмена", "/menu", "/cancel"}))
 async def go_main_any_state(m: Message, state: FSMContext):
@@ -480,8 +455,10 @@ async def go_main_any_state(m: Message, state: FSMContext):
 @dp.callback_query(StateFilter("*"), F.data == "to_main")
 async def cb_to_main_any_state(cq: CallbackQuery, state: FSMContext):
     await show_main_menu(cq)
-    try: await cq.answer()
-    except Exception: pass
+    try:
+        await cq.answer()
+    except Exception:
+        pass
 
 @dp.message(StateFilter("*"), F.text == "✍️ Продолжить")
 async def resume_input(m: Message, state: FSMContext):
@@ -491,11 +468,13 @@ async def resume_input(m: Message, state: FSMContext):
 async def on_leave_room(m: Message):
     room = await get_user_active_room(m.from_user.id)
     if not room:
-        await send_single(m, "Комнат не найдено.", user_reply_kb(False)); return
+        await send_single(m, "Комнат не найдено.", user_reply_kb(False))
+        return
     async with Session() as s:
         me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
         if me:
-            await s.delete(me); await s.commit()
+            await s.delete(me)
+            await s.commit()
     await send_single(m, "Ты вышел из комнаты. Можно присоединиться к другой или создать новую.", user_reply_kb(False))
 
 @dp.message(F.text == "/panic")
@@ -512,7 +491,8 @@ async def cmd_start(m: Message):
     payload = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
     if payload.startswith("room_"):
         code = payload.removeprefix("room_")
-        await enter_room_menu(m, code); return
+        await enter_room_menu(m, code)
+        return
     room = await get_user_active_room(m.from_user.id)
     if room:
         await send_single(m, f"👋 <b>Тайный Санта</b>\nТвоя комната: <code>{room.code}</code>\n\nНажимай «🏠 Меню» в любой момент — введённое не потеряется.", user_reply_kb(True))
@@ -530,10 +510,12 @@ async def on_create_btn(m: Message):
     async with Session() as s:
         active_count = (await s.execute(select(func.count()).select_from(Room).where(Room.owner_id == m.from_user.id))).scalar()
         if active_count >= MAX_ROOMS_PER_OWNER and not await is_premium(m.from_user.id):
-            await send_single(m, f"Лимит комнат исчерпан ({MAX_ROOMS_PER_OWNER}). ⭐ Получи Премиум для расширения.", user_reply_kb(False)); return
+            await send_single(m, f"Лимит комнат исчерпан ({MAX_ROOMS_PER_OWNER}). ⭐ Получи Премиум для расширения.", user_reply_kb(False))
+            return
     code = gen_code()
     async with Session() as s:
-        s.add(Room(code=code, owner_id=m.from_user.id)); await s.commit()
+        s.add(Room(code=code, owner_id=m.from_user.id))
+        await s.commit()
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start=room_{code}"
     await log("room_new", user_id=m.from_user.id, room_code=code)
@@ -554,7 +536,8 @@ async def on_join_code(m: Message, state: FSMContext):
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
         if not room:
-            await send_single(m, "Комната не найдена. Проверь код.", user_reply_kb(False)); return
+            await send_single(m, "Комната не найдена. Проверь код.", user_reply_kb(False))
+            return
     await state.clear()
     await state.update_data(room_code=code)
     await state.set_state(Join.name)
@@ -565,14 +548,16 @@ async def on_join_code(m: Message, state: FSMContext):
 async def on_rules(m: Message):
     room = await get_user_active_room(m.from_user.id)
     if not room:
-        await send_single(m, "Ты ещё не в комнате.", user_reply_kb(False)); return
+        await send_single(m, "Ты ещё не в комнате.", user_reply_kb(False))
+        return
     await send_single(m, make_rules_text(room), user_reply_kb(True))
 
 @dp.message(F.text == "📝 Хотелки")
 async def on_wishes_btn(m: Message, state: FSMContext):
     room = await get_user_active_room(m.from_user.id)
     if not room:
-        await send_single(m, "Ты ещё не в комнате.", user_reply_kb(False)); return
+        await send_single(m, "Ты ещё не в комнате.", user_reply_kb(False))
+        return
     await state.update_data(room_code=room.code)
     await state.set_state(Join.wishes)
     await send_single(m, "Напиши свои хотелки/табу:", user_reply_kb(True))
@@ -582,13 +567,16 @@ async def on_target_btn(m: Message):
     async with Session() as s:
         room = await get_user_active_room(m.from_user.id)
         if not room:
-            await send_single(m, "Ты ещё не в комнате.", user_reply_kb(False)); return
+            await send_single(m, "Ты ещё не в комнате.", user_reply_kb(False))
+            return
         me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
         if not me:
-            await send_single(m, "Ты ещё не в комнате.", user_reply_kb(False)); return
+            await send_single(m, "Ты ещё не в комнате.", user_reply_kb(False))
+            return
         pair = (await s.execute(select(Pair).where(Pair.room_id == room.id, Pair.giver_id == me.id))).scalar_one_or_none()
         if not pair:
-            await send_single(m, "Жеребьёвки ещё не было.", user_reply_kb(True)); return
+            await send_single(m, "Жеребьёвки ещё не было.", user_reply_kb(True))
+            return
         recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
     await send_single(m, f"Ты даришь: <b>{recv.name}</b>\nХотелки: {recv.wishes or 'не указаны'}", user_reply_kb(True))
 
@@ -596,35 +584,38 @@ async def on_target_btn(m: Message):
 async def ideas_reply(m: Message):
     room = await get_user_active_room(m.from_user.id)
     if not room:
-        return await send_single(m, "Сначала зайди в комнату.", user_reply_kb(False))
+        await send_single(m, "Сначала зайди в комнату.", user_reply_kb(False))
+        return
     await enter_room_menu(m, room.code)
 
 @dp.message(F.text == "🛒 Купить")
 async def buy_reply(m: Message):
     room = await get_user_active_room(m.from_user.id)
     if not room:
-        return await send_single(m, "Сначала зайди в комнату.", user_reply_kb(False))
+        await send_single(m, "Сначала зайди в комнату.", user_reply_kb(False))
+        return
     await enter_room_menu(m, room.code)
 
 @dp.message(F.text.in_({"⭐ Премиум", "/premium"}))
 async def premium_info(m: Message):
     in_room = await get_user_active_room(m.from_user.id) is not None
-    await send_single(m,
-      "⭐ <b>Премиум</b> открывает:\n"
-      "• Больше комнат/участников\n"
-      "• Челлендж-правила, подсказки без лимита\n"
-      "• Корпоративный режим, экспорт CSV\n\n"
-      "Оплата через Telegram. Напиши @your_handle для активации (в демо — заглушка).",
-      user_reply_kb(in_room)
+    await send_single(
+        m,
+        "⭐ <b>Премиум</b> открывает:\n"
+        "• Больше комнат/участников\n"
+        "• Челлендж-правила, подсказки без лимита\n"
+        "• Корпоративный режим, экспорт CSV\n\n"
+        "Оплата через Telegram. Напиши @your_handle для активации (в демо — заглушка).",
+        user_reply_kb(in_room)
     )
 
-@dp.message(F.text.in_({"/terms","/privacy"}))
+@dp.message(F.text.in_({"/terms", "/privacy"}))
 async def legal(m: Message):
     in_room = await get_user_active_room(m.from_user.id) is not None
     if m.text == "/terms":
-        await send_single(m, "Пользовательское соглашение:\n\n"+TERMS_TEXT, user_reply_kb(in_room))
+        await send_single(m, "Пользовательское соглашение:\n\n" + TERMS_TEXT, user_reply_kb(in_room))
     else:
-        await send_single(m, "Политика конфиденциальности:\n\n"+PRIVACY_TEXT, user_reply_kb(in_room))
+        await send_single(m, "Политика конфиденциальности:\n\n" + PRIVACY_TEXT, user_reply_kb(in_room))
 
 @dp.message(F.text == "👤 Профиль")
 async def on_profile(m: Message):
@@ -646,8 +637,10 @@ async def on_profile(m: Message):
                 select(func.count()).select_from(Hint).where(Hint.sender_participant_id.in_(p_ids))
             )).scalar()
     role = []
-    if owned: role.append(f"владелец {owned} комн.")
-    if parts: role.append(f"участник {len(parts)} комн.")
+    if owned:
+        role.append(f"владелец {owned} комн.")
+    if parts:
+        role.append(f"участник {len(parts)} комн.")
     role_text = ", ".join(role) if role else "новичок"
     lr = f"{last_room.title} (<code>{last_room.code}</code>)" if last_room else "—"
     text = (
@@ -675,7 +668,8 @@ async def on_wishes(m: Message, state: FSMContext):
         count = (await s.execute(select(func.count()).select_from(Participant).where(Participant.room_id == room.id))).scalar()
         if count >= MAX_PARTICIPANTS_PER_ROOM:
             await state.clear()
-            await send_single(m, "Достигнут лимит участников для этой комнаты.", user_reply_kb(False)); return
+            await send_single(m, "Достигнут лимит участников для этой комнаты.", user_reply_kb(False))
+            return
         p = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
         if p:
             p.name = data["name"]
@@ -694,10 +688,12 @@ async def cb_room_new(cq: CallbackQuery):
     async with Session() as s:
         active_count = (await s.execute(select(func.count()).select_from(Room).where(Room.owner_id == cq.from_user.id))).scalar()
         if active_count >= MAX_ROOMS_PER_OWNER and not await is_premium(cq.from_user.id):
-            await cq.answer(f"Лимит комнат исчерпан ({MAX_ROOMS_PER_OWNER}). ⭐ Премиум расширит лимиты.", show_alert=True); return
+            await cq.answer(f"Лимит комнат исчерпан ({MAX_ROOMS_PER_OWNER}). ⭐ Премиум расширит лимиты.", show_alert=True)
+            return
     code = gen_code()
     async with Session() as s:
-        s.add(Room(code=code, owner_id=cq.from_user.id)); await s.commit()
+        s.add(Room(code=code, owner_id=cq.from_user.id))
+        await s.commit()
     await log("room_new", user_id=cq.from_user.id, room_code=code)
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start=room_{code}"
@@ -715,7 +711,8 @@ async def enter_room_menu(msg: Message | CallbackQuery, code: str):
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
         if not room:
-            await send_menu(msg, "Комната не найдена.", main_kb()); return
+            await send_menu(msg, "Комната не найдена.", main_kb())
+            return
         user_id = msg.from_user.id
         part = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == user_id))).scalar_one_or_none()
         if not part:
@@ -723,16 +720,20 @@ async def enter_room_menu(msg: Message | CallbackQuery, code: str):
             kb.button(text="✅ Присоединиться", callback_data=f"join:{code}")
             kb.button(text="↩️ Назад", callback_data="to_main")
             rules = []
-            if room.rule_letter: rules.append(f"буква {room.rule_letter}")
-            if room.rule_amount_exact: rules.append(f"сумма ровно {room.rule_amount_exact}₽")
-            if room.rule_amount_max: rules.append(f"сумма до {room.rule_amount_max}₽")
+            if room.rule_letter:
+                rules.append(f"буква {room.rule_letter}")
+            if room.rule_amount_exact:
+                rules.append(f"сумма ровно {room.rule_amount_exact}₽")
+            if room.rule_amount_max:
+                rules.append(f"сумма до {room.rule_amount_max}₽")
             info = (
                 f"Комната <b>{room.title}</b> (<code>{room.code}</code>)\n"
                 f"Бюджет: {room.budget or '—'} | Дедлайн: {room.deadline_at.date() if room.deadline_at else '—'}\n"
                 f"Правила: {', '.join(rules) if rules else '—'}\n"
                 f"Режим: {'Корпоративный' if room.corporate else 'Обычный'}"
             )
-            await send_menu(msg, info, kb.as_markup()); return
+            await send_menu(msg, info, kb.as_markup())
+            return
         is_owner = (room.owner_id == user_id)
         await send_menu(msg, f"Комната <b>{room.title}</b> (<code>{room.code}</code>)", main_kb(room.code, is_owner))
 
@@ -748,7 +749,9 @@ async def cb_participants(cq: CallbackQuery):
     code = cq.data.split(":", 1)[1]
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
-        if not room: await send_menu(cq, "Комната не найдена.", main_kb()); return
+        if not room:
+            await send_menu(cq, "Комната не найдена.", main_kb())
+            return
         rows = (await s.execute(select(Participant).where(Participant.room_id == room.id).order_by(Participant.joined_at))).scalars().all()
     lines = [f"{i+1}. {p.name}" for i, p in enumerate(rows)]
     names = "\n".join(lines) or "пока пусто"
@@ -766,49 +769,67 @@ async def cb_me_target(cq: CallbackQuery):
     code = cq.data.split(":", 1)[1]
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
-        if not room: await send_menu(cq, "Комната не найдена.", main_kb()); return
+        if not room:
+            await send_menu(cq, "Комната не найдена.", main_kb())
+            return
         me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == cq.from_user.id))).scalar_one_or_none()
-        if not me: await send_menu(cq, "Ты ещё не в комнате. Нажми Присоединиться.", main_kb()); return
+        if not me:
+            await send_menu(cq, "Ты ещё не в комнате. Нажми Присоединиться.", main_kb())
+            return
         pair = (await s.execute(select(Pair).where(Pair.room_id == room.id, Pair.giver_id == me.id))).scalar_one_or_none()
-        if not pair: await send_menu(cq, "Жеребьёвки ещё не было.", main_kb(room.code, cq.from_user.id == room.owner_id)); return
+        if not pair:
+            await send_menu(cq, "Жеребьёвки ещё не было.", main_kb(room.code, cq.from_user.id == room.owner_id))
+            return
         recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
     await send_menu(cq, f"Ты даришь: <b>{recv.name}</b>", main_kb(code, cq.from_user.id == room.owner_id))
 
 # ----- Ideas & Buy (affiliates) -----
 @dp.callback_query(F.data.startswith("ideas:"))
 async def cb_ideas(cq: CallbackQuery):
-    code = cq.data.split(":",1)[1]
+    code = cq.data.split(":", 1)[1]
     async with Session() as s:
-        room = (await s.execute(select(Room).where(Room.code==code))).scalar_one_or_none()
-        me = (await s.execute(select(Participant).where(Participant.room_id==room.id, Participant.user_id==cq.from_user.id))).scalar_one_or_none() if room else None
-        if not (room and me): return await cq.answer("Нужно присоединиться", show_alert=True)
-        pair = (await s.execute(select(Pair).where(Pair.room_id==room.id, Pair.giver_id==me.id))).scalar_one_or_none()
-        if not pair: return await cq.answer("Жеребьёвки ещё не было.", show_alert=True)
-        recv = (await s.execute(select(Participant).where(Participant.id==pair.receiver_id))).scalar_one()
+        room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
+        me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == cq.from_user.id))).scalar_one_or_none() if room else None
+        if not (room and me):
+            await cq.answer("Нужно присоединиться", show_alert=True)
+            return
+        pair = (await s.execute(select(Pair).where(Pair.room_id == room.id, Pair.giver_id == me.id))).scalar_one_or_none()
+        if not pair:
+            await cq.answer("Жеребьёвки ещё не было.", show_alert=True)
+            return
+        recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
     query = wishes_to_query(recv.wishes, room.rule_amount_max or room.rule_amount_exact, room.rule_letter)
-    txt = (f"🎁 Идеи по хотелкам <b>{recv.name}</b>:\n"
-           f"• Категории: {recv.wishes or 'не указаны'}\n"
-           f"• Бюджет: {room.rule_amount_exact or ('до '+str(room.rule_amount_max)+'₽' if room.rule_amount_max else room.budget or '—')}\n\n"
-           f"Нажми «🛒 Купить» — подберём ссылки.")
-    await send_menu(cq, txt, main_kb(code, cq.from_user.id==room.owner_id))
+    txt = (
+        f"🎁 Идеи по хотелкам <b>{recv.name}</b>:\n"
+        f"• Категории: {recv.wishes or 'не указаны'}\n"
+        f"• Бюджет: {room.rule_amount_exact or ('до '+str(room.rule_amount_max)+'₽' if room.rule_amount_max else room.budget or '—')}\n\n"
+        f"Нажми «🛒 Купить» — подберём ссылки."
+    )
+    await send_menu(cq, txt, main_kb(code, cq.from_user.id == room.owner_id))
 
 @dp.callback_query(F.data.startswith("buy:"))
 async def cb_buy(cq: CallbackQuery):
-    code = cq.data.split(":",1)[1]
+    code = cq.data.split(":", 1)[1]
     async with Session() as s:
-        room = (await s.execute(select(Room).where(Room.code==code))).scalar_one_or_none()
-        me = (await s.execute(select(Participant).where(Participant.room_id==room.id, Participant.user_id==cq.from_user.id))).scalar_one_or_none() if room else None
-        if not (room and me): return await cq.answer("Нужно присоединиться", show_alert=True)
-        pair = (await s.execute(select(Pair).where(Pair.room_id==room.id, Pair.giver_id==me.id))).scalar_one_or_none()
-        if not pair: return await cq.answer("Жеребьёвки ещё не было.", show_alert=True)
-        recv = (await s.execute(select(Participant).where(Participant.id==pair.receiver_id))).scalar_one()
+        room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
+        me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == cq.from_user.id))).scalar_one_or_none() if room else None
+        if not (room and me):
+            await cq.answer("Нужно присоединиться", show_alert=True)
+            return
+        pair = (await s.execute(select(Pair).where(Pair.room_id == room.id, Pair.giver_id == me.id))).scalar_one_or_none()
+        if not pair:
+            await cq.answer("Жеребьёвки ещё не было.", show_alert=True)
+            return
+        recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
     query = wishes_to_query(recv.wishes, room.rule_amount_max or room.rule_amount_exact, room.rule_letter)
     if not AFF_TEMPLATES:
-        return await send_menu(cq, "🛒 Партнёрские магазины не настроены. Задай ENV AFFILIATES_JSON.", main_kb(code, cq.from_user.id==room.owner_id))
+        await send_menu(cq, "🛒 Партнёрские магазины не настроены. Задай ENV AFFILIATES_JSON.", main_kb(code, cq.from_user.id == room.owner_id))
+        return
     links = []
     for mk in AFF_TEMPLATES.keys():
         url = mk_aff_url(mk, query)
-        if url: links.append((mk, url))
+        if url:
+            links.append((mk, url))
     async with Session() as s:
         s.add(AffiliateClick(user_id=cq.from_user.id, room_id=room.id, marketplace=(AFF_PRIMARY or links[0][0]), query=query, target_user_id=recv.user_id))
         await s.commit()
@@ -821,27 +842,40 @@ async def cb_buy(cq: CallbackQuery):
 # ----- Anonymous hints -----
 @dp.callback_query(F.data.startswith("hint_send:"))
 async def cb_hint_send(cq: CallbackQuery, state: FSMContext):
-    from sqlalchemy import select, func as sfunc
     code = cq.data.split(":", 1)[1]
     await state.update_data(room_code=code)
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
         me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == cq.from_user.id))).scalar_one_or_none()
-        if not room or not me: await cq.answer("Нужно присоединиться к комнате", show_alert=True); return
+        if not room or not me:
+            await cq.answer("Нужно присоединиться к комнате", show_alert=True)
+            return
         pair = (await s.execute(select(Pair).where(Pair.room_id == room.id, Pair.giver_id == me.id))).scalar_one_or_none()
-        if not pair: await cq.answer("Жеребьёвки ещё не было.", show_alert=True); return
+        if not pair:
+            await cq.answer("Жеребьёвки ещё не было.", show_alert=True)
+            return
         since = datetime.now(UTC) - timedelta(days=1)
-        cnt = (await s.execute(select(sfunc.count()).select_from(Hint).where(Hint.room_id == room.id, Hint.sender_participant_id == me.id, Hint.created_at >= since))).scalar()
-        if cnt >= MAX_HINTS_PER_DAY and not await is_premium(cq.from_user.id): await cq.answer("Лимит подсказок на сегодня исчерпан", show_alert=True); return
+        cnt = (await s.execute(
+            select(func.count()).select_from(Hint).where(
+                Hint.room_id == room.id,
+                Hint.sender_participant_id == me.id,
+                Hint.created_at >= since
+            )
+        )).scalar()
+        if cnt >= MAX_HINTS_PER_DAY and not await is_premium(cq.from_user.id):
+            await cq.answer("Лимит подсказок на сегодня исчерпан", show_alert=True)
+            return
     await state.set_state(SendHint.waiting_text)
     await send_menu(cq, "Напиши подсказку (анонимно отправим твоему получателю):", InlineKeyboardMarkup(inline_keyboard=[]))
 
 @dp.message(SendHint.waiting_text)
 async def on_hint_text(m: Message, state: FSMContext):
-    from sqlalchemy import select
-    data = await state.get_data(); code = data["room_code"]
+    data = await state.get_data()
+    code = data["room_code"]
     text = (m.text or "").strip()
-    if not text: await send_single(m, "Пусто. Напиши текст подсказки.", user_reply_kb(True)); return
+    if not text:
+        await send_single(m, "Пусто. Напиши текст подсказки.", user_reply_kb(True))
+        return
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
         me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one()
@@ -849,8 +883,10 @@ async def on_hint_text(m: Message, state: FSMContext):
         recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
         s.add(Hint(room_id=room.id, sender_participant_id=me.id, receiver_participant_id=recv.id, text=text[:512]))
         await s.commit()
-    try: await bot.send_message(recv.user_id, f"🕵️ Тайная подсказка: {text}")
-    except Exception: pass
+    try:
+        await bot.send_message(recv.user_id, f"🕵️ Тайная подсказка: {text}")
+    except Exception:
+        pass
     await log("hint", user_id=m.from_user.id, room_code=code)
     await state.clear()
     await send_single(m, "Готово. Отправил анонимно ✉️", user_reply_kb(True))
@@ -867,133 +903,181 @@ def settings_kb(code: str) -> InlineKeyboardMarkup:
     kb.button(text="🚫 Чёрный список пар", callback_data=f"forbid_ui:{code}")
     kb.button(text="⬅️ Назад", callback_data=f"room_open:{code}")
     kb.button(text="🏠 В главное меню", callback_data="to_main")
-    kb.adjust(1); return kb.as_markup()
+    kb.adjust(1)
+    return kb.as_markup()
 
 @dp.callback_query(F.data.startswith("room_settings:"))
 async def cb_settings(cq: CallbackQuery):
     code = cq.data.split(":", 1)[1]
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
-        if not room: await cq.answer("Нет комнаты", show_alert=True); return
-        if room.owner_id != cq.from_user.id: await cq.answer("Только владелец", show_alert=True); return
+        if not room:
+            await cq.answer("Нет комнаты", show_alert=True)
+            return
+        if room.owner_id != cq.from_user.id:
+            await cq.answer("Только владелец", show_alert=True)
+            return
     await send_menu(cq, "Настройки комнаты:", settings_kb(code))
 
 @dp.callback_query(F.data.startswith("set_budget:"))
 async def cb_set_budget(cq: CallbackQuery, state: FSMContext):
     code = cq.data.split(":", 1)[1]
-    await state.update_data(room_code=code); await state.set_state(SetBudget.waiting)
+    await state.update_data(room_code=code)
+    await state.set_state(SetBudget.waiting)
     await send_menu(cq, "Введи бюджет в ₽ (число) или 0 чтобы очистить:", InlineKeyboardMarkup(inline_keyboard=[]))
 
 @dp.message(SetBudget.waiting)
 async def on_budget(m: Message, state: FSMContext):
-    from sqlalchemy import select
-    data = await state.get_data(); code = data["room_code"]
-    try: val = int(m.text.strip())
-    except Exception: await send_single(m, "Нужно число. Попробуй ещё раз.", user_reply_kb(True)); return
+    data = await state.get_data()
+    code = data["room_code"]
+    try:
+        val = int(m.text.strip())
+    except Exception:
+        await send_single(m, "Нужно число. Попробуй ещё раз.", user_reply_kb(True))
+        return
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
-        if room.owner_id != m.from_user.id: await send_single(m, "Только владелец может менять бюджет", user_reply_kb(True))
-        else: room.budget = None if val <= 0 else val; await s.commit()
-    await state.clear(); await enter_room_menu(m, code)
+        if room.owner_id != m.from_user.id:
+            await send_single(m, "Только владелец может менять бюджет", user_reply_kb(True))
+        else:
+            room.budget = None if val <= 0 else val
+            await s.commit()
+    await state.clear()
+    await enter_room_menu(m, code)
 
 @dp.callback_query(F.data.startswith("set_deadline:"))
 async def cb_set_deadline(cq: CallbackQuery, state: FSMContext):
     code = cq.data.split(":", 1)[1]
-    await state.update_data(room_code=code); await state.set_state(SetDeadline.waiting)
+    await state.update_data(room_code=code)
+    await state.set_state(SetDeadline.waiting)
     await send_menu(cq, "Введи дедлайн в формате YYYY-MM-DD или 0 чтобы очистить:", InlineKeyboardMarkup(inline_keyboard=[]))
 
 @dp.message(SetDeadline.waiting)
 async def on_deadline(m: Message, state: FSMContext):
-    from sqlalchemy import select
-    data = await state.get_data(); code = data["room_code"]; txt = (m.text or "").strip()
+    data = await state.get_data()
+    code = data["room_code"]
+    txt = (m.text or "").strip()
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
         if room.owner_id != m.from_user.id:
             await send_single(m, "Только владелец может менять дедлайн", user_reply_kb(True))
         else:
-            if txt == "0": room.deadline_at = None
+            if txt == "0":
+                room.deadline_at = None
             else:
-                try: room.deadline_at = datetime.strptime(txt, "%Y-%m-%d").replace(tzinfo=None)
-                except Exception: await send_single(m, "Неверный формат. Пример: 2025-12-20", user_reply_kb(True)); return
+                try:
+                    room.deadline_at = datetime.strptime(txt, "%Y-%m-%d").replace(tzinfo=None)
+                except Exception:
+                    await send_single(m, "Неверный формат. Пример: 2025-12-20", user_reply_kb(True))
+                    return
             await s.commit()
-    await state.clear(); await enter_room_menu(m, code)
+    await state.clear()
+    await enter_room_menu(m, code)
 
 @dp.callback_query(F.data.startswith("rule_letter:"))
 async def cb_rule_letter(cq: CallbackQuery, state: FSMContext):
     code = cq.data.split(":", 1)[1]
-    await state.update_data(room_code=code); await state.set_state(SetRuleLetter.waiting)
+    await state.update_data(room_code=code)
+    await state.set_state(SetRuleLetter.waiting)
     await send_menu(cq, "Укажи букву (A–Я) или 0 чтобы очистить:", InlineKeyboardMarkup(inline_keyboard=[]))
 
 @dp.message(SetRuleLetter.waiting)
 async def on_rule_letter(m: Message, state: FSMContext):
-    from sqlalchemy import select
-    code = (await state.get_data())["room_code"]; val = (m.text or "").strip()
+    code = (await state.get_data())["room_code"]
+    val = (m.text or "").strip()
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
-        if room.owner_id != m.from_user.id: await send_single(m, "Только владелец", user_reply_kb(True))
-        else: room.rule_letter = None if val == "0" else val[:1].upper(); await s.commit()
-    await state.clear(); await enter_room_menu(m, code)
+        if room.owner_id != m.from_user.id:
+            await send_single(m, "Только владелец", user_reply_kb(True))
+        else:
+            room.rule_letter = None if val == "0" else val[:1].upper()
+            await s.commit()
+    await state.clear()
+    await enter_room_menu(m, code)
 
 @dp.callback_query(F.data.startswith("rule_exact:"))
 async def cb_rule_exact(cq: CallbackQuery, state: FSMContext):
     code = cq.data.split(":", 1)[1]
-    await state.update_data(room_code=code); await state.set_state(SetRuleExact.waiting)
+    await state.update_data(room_code=code)
+    await state.set_state(SetRuleExact.waiting)
     await send_menu(cq, "Укажи точную сумму в ₽ или 0 чтобы очистить:", InlineKeyboardMarkup(inline_keyboard=[]))
 
 @dp.message(SetRuleExact.waiting)
 async def on_rule_exact(m: Message, state: FSMContext):
-    from sqlalchemy import select
     code = (await state.get_data())["room_code"]
-    try: val = int(m.text.strip())
-    except Exception: await send_single(m, "Нужно число", user_reply_kb(True)); return
+    try:
+        val = int(m.text.strip())
+    except Exception:
+        await send_single(m, "Нужно число", user_reply_kb(True))
+        return
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
-        if room.owner_id != m.from_user.id: await send_single(m, "Только владелец", user_reply_kb(True))
-        else: room.rule_amount_exact = None if val <= 0 else val; await s.commit()
-    await state.clear(); await enter_room_menu(m, code)
+        if room.owner_id != m.from_user.id:
+            await send_single(m, "Только владелец", user_reply_kb(True))
+        else:
+            room.rule_amount_exact = None if val <= 0 else val
+            await s.commit()
+    await state.clear()
+    await enter_room_menu(m, code)
 
 @dp.callback_query(F.data.startswith("rule_max:"))
 async def cb_rule_max(cq: CallbackQuery, state: FSMContext):
     code = cq.data.split(":", 1)[1]
-    await state.update_data(room_code=code); await state.set_state(SetRuleMax.waiting)
+    await state.update_data(room_code=code)
+    await state.set_state(SetRuleMax.waiting)
     await send_menu(cq, "Укажи максимальную сумму в ₽ или 0 чтобы очистить:", InlineKeyboardMarkup(inline_keyboard=[]))
 
 @dp.message(SetRuleMax.waiting)
 async def on_rule_max(m: Message, state: FSMContext):
-    from sqlalchemy import select
     code = (await state.get_data())["room_code"]
-    try: val = int(m.text.strip())
-    except Exception: await send_single(m, "Нужно число", user_reply_kb(True)); return
+    try:
+        val = int(m.text.strip())
+    except Exception:
+        await send_single(m, "Нужно число", user_reply_kb(True))
+        return
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
-        if room.owner_id != m.from_user.id: await send_single(m, "Только владелец", user_reply_kb(True))
-        else: room.rule_amount_max = None if val <= 0 else val; await s.commit()
-    await state.clear(); await enter_room_menu(m, code)
+        if room.owner_id != m.from_user.id:
+            await send_single(m, "Только владелец", user_reply_kb(True))
+        else:
+            room.rule_amount_max = None if val <= 0 else val
+            await s.commit()
+    await state.clear()
+    await enter_room_menu(m, code)
 
 @dp.callback_query(F.data.startswith("corp_toggle:"))
 async def cb_corp_toggle(cq: CallbackQuery):
     code = cq.data.split(":", 1)[1]
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
-        if not room: await cq.answer("Нет комнаты", show_alert=True); return
-        if room.owner_id != cq.from_user.id: await cq.answer("Только владелец", show_alert=True); return
-        room.corporate = not room.corporate; await s.commit()
+        if not room:
+            await cq.answer("Нет комнаты", show_alert=True)
+            return
+        if room.owner_id != cq.from_user.id:
+            await cq.answer("Только владелец", show_alert=True)
+            return
+        room.corporate = not room.corporate
+        await s.commit()
     await log("corp_toggle", user_id=cq.from_user.id, room_code=code, data="on" if room.corporate else "off")
     await enter_room_menu(cq, code)
 
 @dp.callback_query(F.data.startswith("forbid_ui:"))
 async def cb_forbid_ui(cq: CallbackQuery, state: FSMContext):
-    from sqlalchemy import select
     code = cq.data.split(":", 1)[1]
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
-        if not room: await cq.answer("Нет комнаты", show_alert=True); return
-        if room.owner_id != cq.from_user.id: await cq.answer("Только владелец", show_alert=True); return
+        if not room:
+            await cq.answer("Нет комнаты", show_alert=True)
+            return
+        if room.owner_id != cq.from_user.id:
+            await cq.answer("Только владелец", show_alert=True)
+            return
         parts = (await s.execute(select(Participant).where(Participant.room_id == room.id))).scalars().all()
         forb = (await s.execute(select(ForbiddenPair).where(ForbiddenPair.room_id == room.id))).scalars().all()
     if not parts:
-        await send_menu(cq, "Список пуст.", settings_kb(code)); return
-    id_to_idx = {p.id: i+1 for i, p in enumerate(parts)}
+        await send_menu(cq, "Список пуст.", settings_kb(code))
+        return
+    id_to_idx = {p.id: i + 1 for i, p in enumerate(parts)}
     ftext = "\n".join(f"{id_to_idx[fp.giver_id]}→{id_to_idx[fp.receiver_id]}" for fp in forb) or "—"
     txt = (
         "Чёрный список пар (giver→receiver):\n"
@@ -1001,51 +1085,70 @@ async def cb_forbid_ui(cq: CallbackQuery, state: FSMContext):
         "Отправь два номера через пробел, напр.: <code>1 3</code> (1 не дарит 3).\n"
         "Отправь 0 0 чтобы очистить всё."
     )
-    await state.update_data(room_code=code); await state.set_state(AddForbidden.waiting)
+    await state.update_data(room_code=code)
+    await state.set_state(AddForbidden.waiting)
     await send_menu(cq, txt, InlineKeyboardMarkup(inline_keyboard=[]))
 
 @dp.message(AddForbidden.waiting)
 async def on_forbidden(m: Message, state: FSMContext):
-    from sqlalchemy import select
-    data = await state.get_data(); code = data["room_code"]; txt = (m.text or "").strip()
+    data = await state.get_data()
+    code = data["room_code"]
+    txt = (m.text or "").strip()
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
-        if room.owner_id != m.from_user.id: await send_single(m, "Только владелец", user_reply_kb(True)); return
+        if room.owner_id != m.from_user.id:
+            await send_single(m, "Только владелец", user_reply_kb(True))
+            return
         parts = (await s.execute(select(Participant).where(Participant.room_id == room.id).order_by(Participant.joined_at))).scalars().all()
         if txt == "0 0":
-            await s.execute(ForbiddenPair.__table__.delete().where(ForbiddenPair.room_id == room.id)); await s.commit()
-            await state.clear(); await enter_room_menu(m, code); return
+            await s.execute(ForbiddenPair.__table__.delete().where(ForbiddenPair.room_id == room.id))
+            await s.commit()
+            await state.clear()
+            await enter_room_menu(m, code)
+            return
         try:
-            i_str, j_str = txt.split(); i, j = int(i_str) - 1, int(j_str) - 1
-            if not (0 <= i < len(parts) and 0 <= j < len(parts)): raise ValueError
+            i_str, j_str = txt.split()
+            i, j = int(i_str) - 1, int(j_str) - 1
+            if not (0 <= i < len(parts) and 0 <= j < len(parts)):
+                raise ValueError
         except Exception:
-            await send_single(m, "Неверный ввод. Пример: 1 3 или 0 0", user_reply_kb(True)); return
+            await send_single(m, "Неверный ввод. Пример: 1 3 или 0 0", user_reply_kb(True))
+            return
         giver, recv = parts[i], parts[j]
         if giver.id == recv.id:
-            await send_single(m, "Нельзя запрещать самого себя (это и так запрещено)", user_reply_kb(True)); return
+            await send_single(m, "Нельзя запрещать самого себя (это и так запрещено)", user_reply_kb(True))
+            return
         exists = (await s.execute(select(ForbiddenPair).where(
             ForbiddenPair.room_id == room.id, ForbiddenPair.giver_id == giver.id, ForbiddenPair.receiver_id == recv.id
         ))).scalar_one_or_none()
         if not exists:
-            s.add(ForbiddenPair(room_id=room.id, giver_id=giver.id, receiver_id=recv.id)); await s.commit()
+            s.add(ForbiddenPair(room_id=room.id, giver_id=giver.id, receiver_id=recv.id))
+            await s.commit()
             await log("forbid_add", user_id=m.from_user.id, room_code=code, data=json.dumps({"giver": giver.name, "recv": recv.name}))
-    await state.clear(); await enter_room_menu(m, code)
+    await state.clear()
+    await enter_room_menu(m, code)
 
 @dp.callback_query(F.data.startswith("room_draw:"))
 async def cb_room_draw(cq: CallbackQuery):
-    from sqlalchemy import select
     code = cq.data.split(":", 1)[1]
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
-        if not room: await send_menu(cq, "Комната не найдена.", main_kb()); return
-        if room.owner_id != cq.from_user.id: await cq.answer("Только создатель комнаты.", show_alert=True); return
+        if not room:
+            await send_menu(cq, "Комната не найдена.", main_kb())
+            return
+        if room.owner_id != cq.from_user.id:
+            await cq.answer("Только создатель комнаты.", show_alert=True)
+            return
         parts = (await s.execute(select(Participant).where(Participant.room_id == room.id))).scalars().all()
-        if len(parts) < 2: await cq.answer("Нужно минимум 2 участника.", show_alert=True); return
+        if len(parts) < 2:
+            await cq.answer("Нужно минимум 2 участника.", show_alert=True)
+            return
         forbidden = {(fp.giver_id, fp.receiver_id) for fp in (await s.execute(select(ForbiddenPair).where(ForbiddenPair.room_id == room.id))).scalars().all()}
         await s.execute(Pair.__table__.delete().where(Pair.room_id == room.id))
         pairs = draw_pairs([p.id for p in parts], forbidden)
         s.add_all([Pair(room_id=room.id, giver_id=g, receiver_id=r) for g, r in pairs])
-        room.drawn = True; await s.commit()
+        room.drawn = True
+        await s.commit()
     await cq.answer("Жеребьёвка выполнена!", show_alert=True)
     await log("draw", user_id=cq.from_user.id, room_code=code)
     await send_menu(cq, "Жеребьёвка готова. Всем отправлены инструкции в личку.", main_kb(code, True))
@@ -1053,9 +1156,12 @@ async def cb_room_draw(cq: CallbackQuery):
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
         pairs = (await s.execute(select(Pair).where(Pair.room_id == room.id))).scalars().all()
         rules = []
-        if room.rule_letter: rules.append(f"буква {room.rule_letter}")
-        if room.rule_amount_exact: rules.append(f"сумма ровно {room.rule_amount_exact}₽")
-        if room.rule_amount_max: rules.append(f"сумма до {room.rule_amount_max}₽")
+        if room.rule_letter:
+            rules.append(f"буква {room.rule_letter}")
+        if room.rule_amount_exact:
+            rules.append(f"сумма ровно {room.rule_amount_exact}₽")
+        if room.rule_amount_max:
+            rules.append(f"сумма до {room.rule_amount_max}₽")
         rules_text = ("\nПравило: " + ", ".join(rules)) if rules else ""
         for pair in pairs:
             giver = (await s.execute(select(Participant).where(Participant.id == pair.giver_id))).scalar_one()
@@ -1074,12 +1180,17 @@ async def cb_export_csv(cq: CallbackQuery):
     code = cq.data.split(":", 1)[1]
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
-        if not room: await cq.answer("Нет комнаты", show_alert=True); return
-        if room.owner_id != cq.from_user.id: await cq.answer("Только владелец", show_alert=True); return
+        if not room:
+            await cq.answer("Нет комнаты", show_alert=True)
+            return
+        if room.owner_id != cq.from_user.id:
+            await cq.answer("Только владелец", show_alert=True)
+            return
         parts = (await s.execute(select(Participant).where(Participant.room_id == room.id))).scalars().all()
         pairs = (await s.execute(select(Pair).where(Pair.room_id == room.id))).scalars().all()
     part_by_id = {p.id: p for p in parts}
-    buf = io.StringIO(); w = csv.writer(buf)
+    buf = io.StringIO()
+    w = csv.writer(buf)
     w.writerow(["name", "wishes", "target_name"])
     tgt_by_giver = {p.giver_id: p.receiver_id for p in pairs}
     for p in parts:
@@ -1140,13 +1251,11 @@ async def main():
             while True:
                 await asyncio.sleep(3600)
         finally:
-            # В webhook-режиме лок не используется
-            pass
+            pass  # в webhook-режиме лок не используем
     else:
         # --- POLLING MODE + HEALTH + RUNTIME LOCK ---
         from aiohttp import web
 
-        # На всякий случай убираем внешний вебхук
         info = await bot.get_webhook_info()
         if info.url:
             print("Drop foreign webhook:", info.url)
@@ -1157,10 +1266,11 @@ async def main():
             print("Another instance already holds the polling lock. Exiting.")
             return
 
-        # Health endpoint
         app = web.Application()
+
         async def health(_):
             return web.Response(text="ok")
+
         app.router.add_get("/health", health)
 
         runner = web.AppRunner(app)
@@ -1176,3 +1286,9 @@ async def main():
                 await release_runtime_lock()
             except Exception as e:
                 print("Release runtime lock failed:", e)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
