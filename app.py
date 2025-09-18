@@ -35,6 +35,13 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is required")
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./santa.db")
+
+# Авто-апгрейд URL на psycopg3 (чтобы не ловить psycopg2)
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql://") and "+psycopg" not in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # если задан — будет режим webhook, иначе polling
 PORT = int(os.environ.get("PORT", "10000"))
 
