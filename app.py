@@ -1118,47 +1118,61 @@ async def main():
     asyncio.create_task(reminder_loop())
 
     if WEBHOOK_URL:
+        # --- WEBHOOK MODE ---
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
         from aiohttp import web
+
         app = web.Application()
         webhook_path = "/webhook"
+
         SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=webhook_path)
         setup_application(app, dp, bot=bot)
+
         await bot.set_webhook(WEBHOOK_URL + webhook_path, drop_pending_updates=True)
-        runner = web.AppRunner(app); await runner.setup()
-        site = web.TCPSite(runner, host="0.0.0.0", port=PORT); await site.start()
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
+        await site.start()
+
         print(f"Webhook listening on :{PORT}{webhook_path}")
-        while True: await asyncio.sleep(3600)
-    else:
-        # polling + health endpoint + DB-lock
-from aiohttp import web
-info = await bot.get_webhook_info()
-if info.url:
-    print("Drop foreign webhook:", info.url)
-await bot.delete_webhook(drop_pending_updates=True)
-
-got = await acquire_runtime_lock()
-if not got:
-    print("Another instance already holds the polling lock. Exiting.")
-    return
-
-app = web.Application()
-app.router.add_get("/health", lambda request: web.Response(text="ok"))
-runner = web.AppRunner(app); await runner.setup()
-site = web.TCPSite(runner, host="0.0.0.0", port=PORT); await site.start()
-print(f"Polling + health on :{PORT}/health")
-
-try:
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-finally:
-    # освобождаем лок только если его брали
-    if got:
         try:
-            await release_runtime_lock()
-        except Exception as e:
-            print("Release runtime lock failed:", e)
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+            while True:
+                await asyncio.sleep(3600)
+        finally:
+            # В webhook-режиме лок не используется
+            pass
+    else:
+        # --- POLLING MODE + HEALTH + RUNTIME LOCK ---
+        from aiohttp import web
+
+        # На всякий случай убираем внешний вебхук
+        info = await bot.get_webhook_info()
+        if info.url:
+            print("Drop foreign webhook:", info.url)
+        await bot.delete_webhook(drop_pending_updates=True)
+
+        got = await acquire_runtime_lock()
+        if not got:
+            print("Another instance already holds the polling lock. Exiting.")
+            return
+
+        # Health endpoint
+        app = web.Application()
+        async def health(_):
+            return web.Response(text="ok")
+        app.router.add_get("/health", health)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
+        await site.start()
+        print(f"Polling + health on :{PORT}/health")
+
+        try:
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        finally:
+            try:
+                await release_runtime_lock()
+            except Exception as e:
+                print("Release runtime lock failed:", e)
