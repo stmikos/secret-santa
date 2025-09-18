@@ -55,6 +55,27 @@ except Exception:
 AFF_PRIMARY = os.environ.get("AFF_PRIMARY") or (list(AFF_TEMPLATES.keys())[0] if AFF_TEMPLATES else None)
 HUMAN_NAMES = {"wb": "Wildberries", "ozon": "Ozon", "ym": "Яндекс.Маркет"}
 
+# Legal texts
+TERMS_TEXT = (
+    "1) Кто мы: бот для «Тайного Санты» (Сервис).\n"
+    "2) Что делает: комнаты, хотелки, жеребьёвка, подсказки, напоминания, внешние ссылки на магазины.\n"
+    "3) Обязанности пользователя: не нарушать закон; уважать приватность; следовать правилам комнаты.\n"
+    "4) Ограничение ответственности: ссылки ведут на сторонние площадки; за товары и оплату отвечает продавец.\n"
+    "5) Оплата/Премиум: платные функции активируются после оплаты в Telegram; возвраты — по правилам Telegram/провайдера.\n"
+    "6) Аффилиатные ссылки: некоторые ссылки партнёрские; цена для вас не меняется.\n"
+    "7) Изменения условий: могут обновляться; актуальная версия — здесь (/terms).\n"
+    "8) Контакты: @your_handle, support@example.com."
+)
+PRIVACY_TEXT = (
+    "1) Данные: Telegram-ID, имя, хотелки, настройки комнат, служебные логи, агрегированные клики по внешним ссылкам.\n"
+    "2) Цели: работа сервиса (жеребьёвка/подсказки/напоминания), улучшение качества, отчёты организаторам.\n"
+    "3) Срок хранения: пока активна комната и 12 месяцев после — затем анонимизация/удаление; можно запросить удаление.\n"
+    "4) Передача третьим лицам: не передаём, кроме по закону и инфраструктуре (хостинг/БД) с обязательствами конфиденциальности.\n"
+    "5) Трекинг: в боте нет cookie; внешние сайты имеют свои политики.\n"
+    "6) Безопасность: принимаем меры, но нулевой риск не гарантируется.\n"
+    "7) Контакты: @your_handle, support@example.com."
+)
+
 # =======================
 # DB models
 # =======================
@@ -230,16 +251,30 @@ async def is_premium(user_id: int) -> bool:
         rec = (await s.execute(select(Premium).where(Premium.user_id == user_id))).scalar_one_or_none()
     return bool(rec and rec.until > datetime.now(UTC))
 
-async def acquire_runtime_lock() -> bool:
+# ----- runtime lock with TTL -----
+async def acquire_runtime_lock(ttl_seconds: int = 600) -> bool:
+    h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
+    now = datetime.now(UTC)
+    ttl_ago = now - timedelta(seconds=ttl_seconds)
+    async with Session() as s:
+        existing = (await s.execute(select(RuntimeLock).where(RuntimeLock.bot_token_hash == h))).scalar_one_or_none()
+        if existing:
+            if existing.started_at < ttl_ago:
+                await s.delete(existing); await s.commit()
+            else:
+                return False
+        s.add(RuntimeLock(bot_token_hash=h, started_at=now))
+        try:
+            await s.commit(); return True
+        except IntegrityError:
+            await s.rollback(); return False
+
+async def release_runtime_lock():
     h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
     async with Session() as s:
-        s.add(RuntimeLock(bot_token_hash=h))
-        try:
-            await s.commit()
-            return True
-        except IntegrityError:
-            await s.rollback()
-            return False
+        row = (await s.execute(select(RuntimeLock).where(RuntimeLock.bot_token_hash == h))).scalar_one_or_none()
+        if row:
+            await s.delete(row); await s.commit()
 
 # =======================
 # Single-message UX (no piling)
@@ -250,24 +285,19 @@ async def send_single(m: Message | CallbackQuery, text: str, reply_markup: Optio
     chat_id = m.message.chat.id if isinstance(m, CallbackQuery) else m.chat.id
     bot_obj = m.bot if isinstance(m, CallbackQuery) else m.bot
     prev_id = _last_bot_msg.get(chat_id)
-
     if isinstance(m, CallbackQuery):
         sent = await m.message.answer(text, reply_markup=reply_markup)
         try: await m.answer()
         except Exception: pass
     else:
         sent = await m.answer(text, reply_markup=reply_markup)
-
     _last_bot_msg[chat_id] = sent.message_id
     if prev_id:
-        try:
-            await bot_obj.delete_message(chat_id, prev_id)
-        except Exception:
-            pass
+        try: await bot_obj.delete_message(chat_id, prev_id)
+        except Exception: pass
     return sent
 
 async def send_menu(m: Message | CallbackQuery, text: str, kb: InlineKeyboardMarkup):
-    # Всегда отправляем новое сообщение и чистим предыдущее, чтобы не копить
     await send_single(m, text, kb)
 
 # =======================
@@ -379,7 +409,7 @@ async def re_prompt_for_state(m: Message, state: FSMContext):
         await show_main_menu(m)
 
 # =======================
-# Global return & safety
+# Global return & safety (работают в любом состоянии)
 # =======================
 @dp.message(StateFilter("*"), F.text.in_({"🏠 Меню", "⬅️ Назад", "Отмена", "/menu", "/cancel"}))
 async def go_main_any_state(m: Message, state: FSMContext):
@@ -499,6 +529,40 @@ async def on_target_btn(m: Message):
             await send_single(m, "Жеребьёвки ещё не было.", user_reply_kb(True)); return
         recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
     await send_single(m, f"Ты даришь: <b>{recv.name}</b>\nХотелки: {recv.wishes or 'не указаны'}", user_reply_kb(True))
+
+@dp.message(F.text == "🎁 Идеи")
+async def ideas_reply(m: Message):
+    room = await get_user_active_room(m.from_user.id)
+    if not room:
+        return await send_single(m, "Сначала зайди в комнату.", user_reply_kb(False))
+    await enter_room_menu(m, room.code)
+
+@dp.message(F.text == "🛒 Купить")
+async def buy_reply(m: Message):
+    room = await get_user_active_room(m.from_user.id)
+    if not room:
+        return await send_single(m, "Сначала зайди в комнату.", user_reply_kb(False))
+    await enter_room_menu(m, room.code)
+
+@dp.message(F.text.in_({"⭐ Премиум", "/premium"}))
+async def premium_info(m: Message):
+    in_room = await get_user_active_room(m.from_user.id) is not None
+    await send_single(m,
+      "⭐ <b>Премиум</b> открывает:\n"
+      "• Больше комнат/участников\n"
+      "• Челлендж-правила, подсказки без лимита\n"
+      "• Корпоративный режим, экспорт CSV\n\n"
+      "Оплата через Telegram. Напиши @your_handle для активации (в демо — заглушка).",
+      user_reply_kb(in_room)
+    )
+
+@dp.message(F.text.in_({"/terms","/privacy"}))
+async def legal(m: Message):
+    in_room = await get_user_active_room(m.from_user.id) is not None
+    if m.text == "/terms":
+        await send_single(m, "Пользовательское соглашение:\n\n"+TERMS_TEXT, user_reply_kb(in_room))
+    else:
+        await send_single(m, "Политика конфиденциальности:\n\n"+PRIVACY_TEXT, user_reply_kb(in_room))
 
 @dp.message(F.text == "👤 Профиль")
 async def on_profile(m: Message):
@@ -901,9 +965,8 @@ async def on_forbidden(m: Message, state: FSMContext):
             ForbiddenPair.room_id == room.id, ForbiddenPair.giver_id == giver.id, ForbiddenPair.receiver_id == recv.id
         ))).scalar_one_or_none()
         if not exists:
-            from json import dumps
             s.add(ForbiddenPair(room_id=room.id, giver_id=giver.id, receiver_id=recv.id)); await s.commit()
-            await log("forbid_add", user_id=m.from_user.id, room_code=code, data=dumps({"giver": giver.name, "recv": recv.name}))
+            await log("forbid_add", user_id=m.from_user.id, room_code=code, data=json.dumps({"giver": giver.name, "recv": recv.name}))
     await state.clear(); await enter_room_menu(m, code)
 
 @dp.callback_query(F.data.startswith("room_draw:"))
@@ -1023,7 +1086,10 @@ async def main():
         site = web.TCPSite(runner, host="0.0.0.0", port=PORT); await site.start()
         print(f"Polling + health on :{PORT}/health")
 
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        try:
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        finally:
+            await release_runtime_lock()
 
 if __name__ == "__main__":
     try:
