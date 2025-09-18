@@ -178,6 +178,12 @@ async def init_db():
 # =======================
 # Utils
 # =======================
+def _as_aware_utc(dt):
+    """Вернёт datetime с tzinfo=UTC. Если пришла naive — считаем её UTC и проставляем tzinfo."""
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    
 def gen_code(n: int = 6) -> str:
     import secrets
     alphabet = string.ascii_uppercase + string.digits
@@ -253,28 +259,33 @@ async def is_premium(user_id: int) -> bool:
 
 # ----- runtime lock with TTL -----
 async def acquire_runtime_lock(ttl_seconds: int = 600) -> bool:
+    """Эксклюзивный лок на polling. TTL защищает от залипания после падения процесса."""
     h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
     now = datetime.now(UTC)
     ttl_ago = now - timedelta(seconds=ttl_seconds)
+
     async with Session() as s:
-        existing = (await s.execute(select(RuntimeLock).where(RuntimeLock.bot_token_hash == h))).scalar_one_or_none()
+        existing = (await s.execute(
+            select(RuntimeLock).where(RuntimeLock.bot_token_hash == h)
+        )).scalar_one_or_none()
+
         if existing:
-            if existing.started_at < ttl_ago:
-                await s.delete(existing); await s.commit()
+            started_at = _as_aware_utc(existing.started_at)
+            if started_at < ttl_ago:
+                # протухший лок — снимаем
+                await s.delete(existing)
+                await s.commit()
             else:
-                return False
+                return False  # свежий лок удерживается другим процессом
+
+        # пробуем захватить
         s.add(RuntimeLock(bot_token_hash=h, started_at=now))
         try:
-            await s.commit(); return True
+            await s.commit()
+            return True
         except IntegrityError:
-            await s.rollback(); return False
-
-async def release_runtime_lock():
-    h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
-    async with Session() as s:
-        row = (await s.execute(select(RuntimeLock).where(RuntimeLock.bot_token_hash == h))).scalar_one_or_none()
-        if row:
-            await s.delete(row); await s.commit()
+            await s.rollback()
+            return False
 
 # =======================
 # Single-message UX (no piling)
