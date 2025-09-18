@@ -25,3 +25,13 @@ services:
       - key: MAX_HINTS_PER_DAY
         value: "3"
     healthCheckPath: /health
+envVars:
+  - key: AFFILIATES_JSON
+    value: |
+      {
+        "wb": "https://www.wildberries.ru/catalog/0/search.aspx?search={q}&utm_source=santa&utm_medium=bot&utm_campaign=aff",
+        "ozon": "https://www.ozon.ru/search/?text={q}&utm_source=santa&utm_medium=bot&utm_campaign=aff",
+        "ym": "https://market.yandex.ru/search?text={q}&utm_source=santa&utm_medium=bot&utm_campaign=aff"
+      }
+  - key: AFF_PRIMARY
+    value: "wb"
