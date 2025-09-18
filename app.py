@@ -179,10 +179,52 @@ async def init_db():
 # Utils
 # =======================
 def _as_aware_utc(dt):
-    """Вернёт datetime с tzinfo=UTC. Если пришла naive — считаем её UTC и проставляем tzinfo."""
+    """Приводим datetime к UTC-aware (без миграций БД)."""
     if dt is None:
         return None
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+async def acquire_runtime_lock(ttl_seconds: int = 600) -> bool:
+    """
+    Эксклюзивный лок на polling с TTL, чтобы не залипал.
+    Возвращает True, если лок наш; False — если уже удерживается другим процессом.
+    """
+    h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
+    now = datetime.now(UTC)                 # aware
+    ttl_ago = now - timedelta(seconds=ttl_seconds)
+
+    async with Session() as s:
+        existing = (await s.execute(
+            select(RuntimeLock).where(RuntimeLock.bot_token_hash == h)
+        )).scalar_one_or_none()
+
+        if existing:
+            started_at = _as_aware_utc(existing.started_at)
+            if started_at < ttl_ago:
+                # Протухший лок — удаляем и берём новый
+                await s.delete(existing)
+                await s.commit()
+            else:
+                return False
+
+        s.add(RuntimeLock(bot_token_hash=h, started_at=now))
+        try:
+            await s.commit()
+            return True
+        except IntegrityError:
+            await s.rollback()
+            return False
+
+async def release_runtime_lock():
+    """Безопасно снимаем лок (если есть)."""
+    h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
+    async with Session() as s:
+        row = (await s.execute(
+            select(RuntimeLock).where(RuntimeLock.bot_token_hash == h)
+        )).scalar_one_or_none()
+        if row:
+            await s.delete(row)
+            await s.commit()
     
 def gen_code(n: int = 6) -> str:
     import secrets
@@ -287,19 +329,6 @@ async def acquire_runtime_lock(ttl_seconds: int = 600) -> bool:
                 await s.commit()
             else:
                 return False
-                
-                # свежий лок удерживается другим процессом
-                
-   async def release_runtime_lock():
-    """Безопасно снимаем лок (если есть)."""
-    h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
-    async with Session() as s:
-        row = (await s.execute(
-            select(RuntimeLock).where(RuntimeLock.bot_token_hash == h)
-        )).scalar_one_or_none()
-        if row:
-            await s.delete(row)
-            await s.commit()
        
         # пробуем захватить
         s.add(RuntimeLock(bot_token_hash=h, started_at=now))  # пишем aware-дату
