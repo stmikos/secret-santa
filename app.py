@@ -240,7 +240,9 @@ def kb_root(in_room: bool) -> ReplyKeyboardMarkup:
                 [KeyboardButton(text="➕ Создать"), KeyboardButton(text="🔗 Присоединиться")],
                 [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="ℹ️ Правила")],
             ],
-            resize_keyboard=True
+            resize_keyboard=True,
+            one_time_keyboard=False,
+            input_field_placeholder="Создай комнату или присоединись по коду"
         )
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -249,8 +251,10 @@ def kb_root(in_room: bool) -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🎁 Идеи"), KeyboardButton(text="🛒 Купить")],
             [KeyboardButton(text="🚪 Выйти из комнаты")],
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        one_time_keyboard=False
     )
+
 
 # Inline keyboards
 def main_kb(code: Optional[str], is_owner: bool) -> InlineKeyboardMarkup:
@@ -284,10 +288,9 @@ import contextlib
 
 async def show_main(m: Message | CallbackQuery):
     room = await get_user_active_room(m.from_user.id)
-    if isinstance(m, CallbackQuery):
-        await send_single(m, "Главное меню", main_kb(room.code if room else None, bool(room and room.owner_id == m.from_user.id)))
-    else:
-        await send_single(m, "Главное меню", kb_root(bool(room)))
+    in_room = bool(room)
+    # Всегда показываем Reply-клавиатуру (видимые большие кнопки)
+    await send_single(m, "Главное меню", kb_root(in_room))
 
 @dp.message(StateFilter("*"), F.text.in_({"🏠 Меню", "⬅️ Назад", "Отмена", "/menu"}))
 async def any_to_menu(m: Message, state: FSMContext):
