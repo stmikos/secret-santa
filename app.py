@@ -277,7 +277,18 @@ async def acquire_runtime_lock(ttl_seconds: int = 600) -> bool:
                 await s.commit()
             else:
                 return False  # свежий лок удерживается другим процессом
-
+                
+   async def release_runtime_lock():
+    """Безопасно снимаем лок (если есть)."""
+    h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
+    async with Session() as s:
+        row = (await s.execute(
+            select(RuntimeLock).where(RuntimeLock.bot_token_hash == h)
+        )).scalar_one_or_none()
+        if row:
+            await s.delete(row)
+            await s.commit()
+       
         # пробуем захватить
         s.add(RuntimeLock(bot_token_hash=h, started_at=now))  # пишем aware-дату
         try:
@@ -1079,28 +1090,32 @@ async def main():
         while True: await asyncio.sleep(3600)
     else:
         # polling + health endpoint + DB-lock
-        from aiohttp import web
-        info = await bot.get_webhook_info()
-        if info.url:
-            print("Drop foreign webhook:", info.url)
-        await bot.delete_webhook(drop_pending_updates=True)
+from aiohttp import web
+info = await bot.get_webhook_info()
+if info.url:
+    print("Drop foreign webhook:", info.url)
+await bot.delete_webhook(drop_pending_updates=True)
 
-        got = await acquire_runtime_lock()
-        if not got:
-            print("Another instance already holds the polling lock. Exiting.")
-            return
+got = await acquire_runtime_lock()
+if not got:
+    print("Another instance already holds the polling lock. Exiting.")
+    return
 
-        app = web.Application()
-        app.router.add_get("/health", lambda request: web.Response(text="ok"))
-        runner = web.AppRunner(app); await runner.setup()
-        site = web.TCPSite(runner, host="0.0.0.0", port=PORT); await site.start()
-        print(f"Polling + health on :{PORT}/health")
+app = web.Application()
+app.router.add_get("/health", lambda request: web.Response(text="ok"))
+runner = web.AppRunner(app); await runner.setup()
+site = web.TCPSite(runner, host="0.0.0.0", port=PORT); await site.start()
+print(f"Polling + health on :{PORT}/health")
 
+try:
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+finally:
+    # освобождаем лок только если его брали
+    if got:
         try:
-            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-        finally:
             await release_runtime_lock()
-
+        except Exception as e:
+            print("Release runtime lock failed:", e)
 if __name__ == "__main__":
     try:
         asyncio.run(main())
