@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: secret-santa-menu
+    name: secret-santa-bot
     env: python
     plan: free
     buildCommand: "python -m pip install -U pip && pip install -r requirements.txt"
@@ -8,4 +8,20 @@ services:
     envVars:
       - key: BOT_TOKEN
         sync: false
+      # опционально — если используешь Postgres:
+      - key: DATABASE_URL
+        # пример: postgresql+psycopg://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require
+        # (в коде уже отключены prepared statements, так что ничего добавлять не нужно)
+        sync: false
+      # если хочешь вебхук, укажи публичный URL сервиса:
+      - key: WEBHOOK_URL
+        # пример: https://secret-santa-bot.onrender.com
+        sync: false
+      # лимиты — опционально:
+      - key: MAX_ROOMS_PER_OWNER
+        value: "5"
+      - key: MAX_PARTICIPANTS_PER_ROOM
+        value: "200"
+      - key: MAX_HINTS_PER_DAY
+        value: "3"
     healthCheckPath: /health
