@@ -261,8 +261,10 @@ async def is_premium(user_id: int) -> bool:
 async def acquire_runtime_lock(ttl_seconds: int = 600) -> bool:
     """Эксклюзивный лок на polling. TTL защищает от залипания после падения процесса."""
     h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
-    now = datetime.now(UTC)        # aware
-    ttl_ago = now - timedelta(seconds=ttl_seconds)  # aware
+    now = datetime.now(UTC)
+    # aware
+    ttl_ago = now - timedelta(seconds=ttl_seconds)
+    # aware
 
     async with Session() as s:
         existing = (await s.execute(
@@ -270,13 +272,15 @@ async def acquire_runtime_lock(ttl_seconds: int = 600) -> bool:
         )).scalar_one_or_none()
 
         if existing:
-            started_at = _as_aware_utc(existing.started_at)  # привели к aware UTC
+            started_at = _as_aware_utc(existing.started_at)
+            # привели к aware UTC
             if started_at < ttl_ago:
                 # протухший лок — снимаем
                 await s.delete(existing)
                 await s.commit()
             else:
-                return False  # свежий лок удерживается другим процессом
+                return False
+                # свежий лок удерживается другим процессом
                 
    async def release_runtime_lock():
     """Безопасно снимаем лок (если есть)."""
