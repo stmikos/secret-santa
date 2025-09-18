@@ -5,8 +5,8 @@ import string
 import io
 import csv
 import json
-import hashlib
 import urllib.parse
+import hashlib
 from datetime import datetime, timedelta, UTC
 from typing import List, Tuple, Optional, Set, Dict
 
@@ -25,52 +25,39 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String as SAString, DateTime, ForeignKey, Integer, Boolean, UniqueConstraint, select, func
+from sqlalchemy import (
+    String as SAString, DateTime, ForeignKey, Integer, Boolean, UniqueConstraint,
+    select, func
+)
+from sqlalchemy.exc import IntegrityError
 
-# ---------- Config ----------
+# =======================
+# Config
+# =======================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./santa.db")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g. https://your-app.onrender.com
-PORT = int(os.environ.get("PORT", "8000"))
+PORT = int(os.environ.get("PORT", "10000"))
+
 MAX_ROOMS_PER_OWNER = int(os.environ.get("MAX_ROOMS_PER_OWNER", "5"))
 MAX_PARTICIPANTS_PER_ROOM = int(os.environ.get("MAX_PARTICIPANTS_PER_ROOM", "200"))
 MAX_HINTS_PER_DAY = int(os.environ.get("MAX_HINTS_PER_DAY", "3"))
 
-# Affiliate config (JSON map marketplace->url template with {q})
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is required")
+
+# Affiliate config (marketplace -> URL with {q})
 AFF_TEMPLATES: Dict[str, str] = {}
 try:
     AFF_TEMPLATES = json.loads(os.environ.get("AFFILIATES_JSON", "{}"))
 except Exception:
     AFF_TEMPLATES = {}
 AFF_PRIMARY = os.environ.get("AFF_PRIMARY") or (list(AFF_TEMPLATES.keys())[0] if AFF_TEMPLATES else None)
-# Читали AFF_TEMPLATES / AFF_PRIMARY выше
 HUMAN_NAMES = {"wb": "Wildberries", "ozon": "Ozon", "ym": "Яндекс.Маркет"}
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is required")
-
-# ---------- Legal texts ----------
-TERMS_TEXT = (
-    "1) Кто мы: бот для «Тайного Санты» (Сервис).\n"
-    "2) Что делает: комнаты, хотелки, жеребьёвка, подсказки, напоминания, внешние ссылки на магазины.\n"
-    "3) Обязанности пользователя: не нарушать закон; уважать приватность; следовать правилам комнаты.\n"
-    "4) Ограничение ответственности: ссылки ведут на сторонние площадки; за товары и оплату отвечает продавец.\n"
-    "5) Оплата/Премиум: платные функции активируются после оплаты в Telegram; возвраты — по правилам Telegram/провайдера.\n"
-    "6) Аффилиатные ссылки: некоторые ссылки партнёрские; цена для вас не меняется.\n"
-    "7) Изменения условий: могут обновляться; актуальная версия — здесь (/terms).\n"
-    "8) Контакты: @your_handle, support@example.com."
-)
-PRIVACY_TEXT = (
-    "1) Данные: Telegram-ID, имя, хотелки, настройки комнат, служебные логи, агрегированные клики по внешним ссылкам.\n"
-    "2) Цели: работа сервиса (жеребьёвка/подсказки/напоминания), улучшение качества, отчёты организаторам.\n"
-    "3) Срок хранения: пока активна комната и 12 месяцев после — затем анонимизация/удаление; можно запросить удаление.\n"
-    "4) Передача третьим лицам: не передаём, кроме по закону и инфраструктуре (хостинг/БД) с обязательствами конфиденциальности.\n"
-    "5) Трекинг: в боте нет cookie; внешние сайты имеют свои политики.\n"
-    "6) Безопасность: принимаем меры, но нулевой риск не гарантируется.\n"
-    "7) Контакты: @your_handle, support@example.com."
-)
-
-# ---------- DB ----------
+# =======================
+# DB models
+# =======================
 class Base(DeclarativeBase): ...
 
 class Room(Base):
@@ -131,12 +118,6 @@ class AuditLog(Base):
     room_code: Mapped[Optional[str]] = mapped_column(SAString(10), nullable=True)
     event: Mapped[str] = mapped_column(SAString(64))
     data_json: Mapped[Optional[str]] = mapped_column(SAString(2000), nullable=True)
-    
-class RuntimeLock(Base):
-    __tablename__ = "runtime_lock"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    bot_token_hash: Mapped[str] = mapped_column(SAString(64), unique=True, index=True)
-    started_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
 
 class AffiliateClick(Base):
     __tablename__ = "aff_clicks"
@@ -153,7 +134,15 @@ class Premium(Base):
     user_id: Mapped[int] = mapped_column(primary_key=True)
     until: Mapped[datetime] = mapped_column()
 
-# ---------- Engine ----------
+class RuntimeLock(Base):
+    __tablename__ = "runtime_lock"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bot_token_hash: Mapped[str] = mapped_column(SAString(64), unique=True, index=True)
+    started_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
+
+# =======================
+# Engine & session
+# =======================
 CONNECT_ARGS = {}
 if DATABASE_URL.startswith("postgresql+psycopg://"):
     CONNECT_ARGS["prepare_threshold"] = 0  # fix DuplicatePreparedStatement on psycopg3
@@ -165,23 +154,13 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-# ---------- Utils ----------
+# =======================
+# Utils
+# =======================
 def gen_code(n: int = 6) -> str:
     import secrets
     alphabet = string.ascii_uppercase + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(n))
-
-async def acquire_runtime_lock() -> bool:
-    token = os.environ.get("BOT_TOKEN","")
-    h = hashlib.sha256(token.encode()).hexdigest()
-    async with Session() as s:
-        s.add(RuntimeLock(bot_token_hash=h))
-        try:
-            await s.commit()
-            return True
-        except IntegrityError:
-            await s.rollback()
-            return False
 
 async def log(event: str, user_id: Optional[int] = None, room_code: Optional[str] = None, data: Optional[str] = None):
     async with Session() as s:
@@ -205,7 +184,6 @@ def draw_pairs(ids: List[int], forbidden: Set[Tuple[int, int]]) -> List[Tuple[in
             if r == giver: continue
             if (giver, r) in forbidden: continue
             if r in assigned.values(): continue
-            if r in assigned and assigned.get(r) == giver: continue  # prevent two-cycle
             assigned[giver] = r
             if backtrack(i + 1): return True
             assigned.pop(giver, None)
@@ -221,12 +199,9 @@ def draw_pairs(ids: List[int], forbidden: Set[Tuple[int, int]]) -> List[Tuple[in
 
 def make_rules_text(room: Room) -> str:
     rules = []
-    if room.rule_letter:
-        rules.append(f"• Подарок на букву: <b>{room.rule_letter}</b>")
-    if room.rule_amount_exact:
-        rules.append(f"• Сумма ровно: <b>{room.rule_amount_exact}₽</b>")
-    if room.rule_amount_max:
-        rules.append(f"• Сумма максимум: <b>{room.rule_amount_max}₽</b>")
+    if room.rule_letter: rules.append(f"• Подарок на букву: <b>{room.rule_letter}</b>")
+    if room.rule_amount_exact: rules.append(f"• Сумма ровно: <b>{room.rule_amount_exact}₽</b>")
+    if room.rule_amount_max: rules.append(f"• Сумма максимум: <b>{room.rule_amount_max}₽</b>")
     basics = (
         "Общие правила:\n"
         "• Не раскрывай, кому даришь, до обмена 🎅\n"
@@ -239,8 +214,7 @@ def make_rules_text(room: Room) -> str:
     return f"{basics}\n\nСпец-правила комнаты:\n{spec}{extra}"
 
 def wishes_to_query(wishes: str, budget_max: Optional[int], letter: Optional[str]) -> str:
-    kw = wishes or ""
-    parts = [kw]
+    parts = [wishes or ""]
     if budget_max: parts.append(f"до {budget_max} руб")
     if letter: parts.append(f"на букву {letter}")
     return ", ".join([p for p in parts if p]) or "подарок сюрприз"
@@ -256,36 +230,49 @@ async def is_premium(user_id: int) -> bool:
         rec = (await s.execute(select(Premium).where(Premium.user_id == user_id))).scalar_one_or_none()
     return bool(rec and rec.until > datetime.now(UTC))
 
-# ---------- Single-message UX (no piling) ----------
+async def acquire_runtime_lock() -> bool:
+    h = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()
+    async with Session() as s:
+        s.add(RuntimeLock(bot_token_hash=h))
+        try:
+            await s.commit()
+            return True
+        except IntegrityError:
+            await s.rollback()
+            return False
+
+# =======================
+# Single-message UX (no piling)
+# =======================
 _last_bot_msg: Dict[int, int] = {}  # chat_id -> message_id
 
 async def send_single(m: Message | CallbackQuery, text: str, reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None):
     chat_id = m.message.chat.id if isinstance(m, CallbackQuery) else m.chat.id
-    bot = m.bot if isinstance(m, CallbackQuery) else m.bot
+    bot_obj = m.bot if isinstance(m, CallbackQuery) else m.bot
     prev_id = _last_bot_msg.get(chat_id)
-    sent = await (m.message.answer if isinstance(m, CallbackQuery) else m.answer)(text, reply_markup=reply_markup)
+
+    if isinstance(m, CallbackQuery):
+        sent = await m.message.answer(text, reply_markup=reply_markup)
+        try: await m.answer()
+        except Exception: pass
+    else:
+        sent = await m.answer(text, reply_markup=reply_markup)
+
     _last_bot_msg[chat_id] = sent.message_id
     if prev_id:
         try:
-            await bot.delete_message(chat_id, prev_id)
+            await bot_obj.delete_message(chat_id, prev_id)
         except Exception:
             pass
-    if isinstance(m, CallbackQuery):
-        try: await m.answer()
-        except Exception: pass
     return sent
 
 async def send_menu(m: Message | CallbackQuery, text: str, kb: InlineKeyboardMarkup):
-    try:
-        if isinstance(m, CallbackQuery):
-            await m.message.edit_text(text, reply_markup=kb)
-            await m.answer()
-        else:
-            await m.edit_text(text, reply_markup=kb)
-    except Exception:
-        await send_single(m, text, kb)
+    # Всегда отправляем новое сообщение и чистим предыдущее, чтобы не копить
+    await send_single(m, text, kb)
 
-# ---------- FSM ----------
+# =======================
+# FSM
+# =======================
 class Join(StatesGroup):
     name = State()
     wishes = State()
@@ -297,11 +284,15 @@ class SetRuleExact(StatesGroup): waiting = State()
 class SetRuleMax(StatesGroup): waiting = State()
 class SendHint(StatesGroup): waiting_text = State()
 
-# ---------- Bot setup ----------
+# =======================
+# Bot setup
+# =======================
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# ---------- Keyboards ----------
+# =======================
+# Keyboards
+# =======================
 def main_kb(room_code: Optional[str] = None, is_owner: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     if not room_code:
@@ -345,14 +336,15 @@ def user_reply_kb(in_room: bool) -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
-# ---------- Helpers ----------
+# =======================
+# Helpers
+# =======================
 async def get_user_active_room(user_id: int) -> Optional[Room]:
     async with Session() as s:
         p = (await s.execute(
             select(Participant).where(Participant.user_id == user_id).order_by(Participant.joined_at.desc()).limit(1)
         )).scalar_one_or_none()
-        if not p:
-            return None
+        if not p: return None
         return (await s.execute(select(Room).where(Room.id == p.room_id))).scalar_one_or_none()
 
 async def show_main_menu(m: Message | CallbackQuery):
@@ -386,38 +378,49 @@ async def re_prompt_for_state(m: Message, state: FSMContext):
     else:
         await show_main_menu(m)
 
-# ---------- Global return (works everywhere, no state clear) ----------
+# =======================
+# Global return & safety
+# =======================
 @dp.message(StateFilter("*"), F.text.in_({"🏠 Меню", "⬅️ Назад", "Отмена", "/menu", "/cancel"}))
 async def go_main_any_state(m: Message, state: FSMContext):
-    # состояние НЕ чистим — чтобы можно было вернуться «✍️ Продолжить»
     await show_main_menu(m)
 
 @dp.callback_query(StateFilter("*"), F.data == "to_main")
 async def cb_to_main_any_state(cq: CallbackQuery, state: FSMContext):
     await show_main_menu(cq)
-    try:
-        await cq.answer()
-    except Exception:
-        pass
+    try: await cq.answer()
+    except Exception: pass
 
-@dp.message(F.text == "✍️ Продолжить")
+@dp.message(StateFilter("*"), F.text == "✍️ Продолжить")
 async def resume_input(m: Message, state: FSMContext):
     await re_prompt_for_state(m, state)
-    
+
+@dp.message(StateFilter("*"), F.text == "🚪 Выйти из комнаты")
+async def on_leave_room(m: Message):
+    room = await get_user_active_room(m.from_user.id)
+    if not room:
+        await send_single(m, "Комнат не найдено.", user_reply_kb(False)); return
+    async with Session() as s:
+        me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
+        if me:
+            await s.delete(me); await s.commit()
+    await send_single(m, "Ты вышел из комнаты. Можно присоединиться к другой или создать новую.", user_reply_kb(False))
+
 @dp.message(F.text == "/panic")
 async def panic_clear(m: Message, state: FSMContext):
     await state.clear()
     await send_single(m, "Состояние сброшено. Возвращаю в меню.", user_reply_kb(await get_user_active_room(m.from_user.id) is not None))
     await show_main_menu(m)
 
-# ---------- Handlers ----------
+# =======================
+# Handlers
+# =======================
 @dp.message(CommandStart())
 async def cmd_start(m: Message):
     payload = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
     if payload.startswith("room_"):
         code = payload.removeprefix("room_")
-        await enter_room_menu(m, code)
-        return
+        await enter_room_menu(m, code); return
     room = await get_user_active_room(m.from_user.id)
     if room:
         await send_single(m, f"👋 <b>Тайный Санта</b>\nТвоя комната: <code>{room.code}</code>\n\nНажимай «🏠 Меню» в любой момент — введённое не потеряется.", user_reply_kb(True))
@@ -497,62 +500,6 @@ async def on_target_btn(m: Message):
         recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
     await send_single(m, f"Ты даришь: <b>{recv.name}</b>\nХотелки: {recv.wishes or 'не указаны'}", user_reply_kb(True))
 
-@dp.message(F.text == "🎁 Идеи")
-async def ideas_reply(m: Message):
-    room = await get_user_active_room(m.from_user.id)
-    if not room:
-        return await send_single(m, "Сначала зайди в комнату.", user_reply_kb(False))
-    await enter_room_menu(m, room.code)
-
-@dp.message(F.text == "🛒 Купить")
-async def buy_reply(m: Message):
-    room = await get_user_active_room(m.from_user.id)
-    if not room:
-        return await send_single(m, "Сначала зайди в комнату.", user_reply_kb(False))
-    await enter_room_menu(m, room.code)
-
-@dp.message(F.text.in_({"⭐ Премиум", "/premium"}))
-async def premium_info(m: Message):
-    in_room = await get_user_active_room(m.from_user.id) is not None
-    await send_single(m,
-      "⭐ <b>Премиум</b> открывает:\n"
-      "• Больше комнат и участников\n"
-      "• Челлендж-правила, подсказки без лимита\n"
-      "• Корпоративный режим, экспорт CSV\n\n"
-      "Оплата через Telegram. Напиши @your_handle для активации (в демо — заглушка).",
-      user_reply_kb(in_room)
-    )
-
-@dp.message(F.text.in_({"/terms","/privacy"}))
-async def legal(m: Message):
-    in_room = await get_user_active_room(m.from_user.id) is not None
-    if m.text == "/terms":
-        await send_single(m, "Пользовательское соглашение:\n\n"+TERMS_TEXT, user_reply_kb(in_room))
-    else:
-        await send_single(m, "Политика конфиденциальности:\n\n"+PRIVACY_TEXT, user_reply_kb(in_room))
-
-@dp.message(F.text == "🕵️ Подсказка")
-async def on_hint_btn(m: Message, state: FSMContext):
-    room = await get_user_active_room(m.from_user.id)
-    if not room:
-        await send_single(m, "Ты ещё не в комнате.", user_reply_kb(False)); return
-    await state.update_data(room_code=room.code)
-    await state.set_state(SendHint.waiting_text)
-    await send_single(m, "Напиши подсказку (анонимно отправим твоему получателю):", user_reply_kb(True))
-
-@dp.message(StateFilter("*"), F.text == "🚪 Выйти из комнаты")
-async def on_leave_room(m: Message):
-    room = await get_user_active_room(m.from_user.id)
-    if not room:
-        await send_single(m, "Комнат не найдено.", user_reply_kb(False)); return
-    async with Session() as s:
-        me = (await s.execute(
-            select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id)
-        )).scalar_one_or_none()
-        if me:
-            await s.delete(me); await s.commit()
-    await send_single(m, "Ты вышел из комнаты. Можно присоединиться к другой или создать новую.", user_reply_kb(False))
-
 @dp.message(F.text == "👤 Профиль")
 async def on_profile(m: Message):
     uid = m.from_user.id
@@ -587,7 +534,6 @@ async def on_profile(m: Message):
     await send_single(m, text, user_reply_kb(in_room))
 
 # --------- Join flow (FSM) ----------
-class StatesJoin(StatesGroup): ...
 @dp.message(Join.name)
 async def on_name(m: Message, state: FSMContext):
     await state.update_data(name=(m.text or "").strip()[:64])
@@ -601,8 +547,7 @@ async def on_wishes(m: Message, state: FSMContext):
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
         count = (await s.execute(select(func.count()).select_from(Participant).where(Participant.room_id == room.id))).scalar()
-        limit = MAX_PARTICIPANTS_PER_ROOM if (await is_premium(room.owner_id)) else MAX_PARTICIPANTS_PER_ROOM
-        if count >= limit:
+        if count >= MAX_PARTICIPANTS_PER_ROOM:
             await state.clear()
             await send_single(m, "Достигнут лимит участников для этой комнаты.", user_reply_kb(False)); return
         p = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
@@ -664,10 +609,6 @@ async def enter_room_menu(msg: Message | CallbackQuery, code: str):
             await send_menu(msg, info, kb.as_markup()); return
         is_owner = (room.owner_id == user_id)
         await send_menu(msg, f"Комната <b>{room.title}</b> (<code>{room.code}</code>)", main_kb(room.code, is_owner))
-
-@dp.callback_query(F.data == "home")
-async def cb_home(cq: CallbackQuery):
-    await show_main_menu(cq)
 
 @dp.callback_query(F.data.startswith("join:"))
 async def cb_join(cq: CallbackQuery, state: FSMContext):
@@ -731,42 +672,25 @@ async def cb_buy(cq: CallbackQuery):
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code==code))).scalar_one_or_none()
         me = (await s.execute(select(Participant).where(Participant.room_id==room.id, Participant.user_id==cq.from_user.id))).scalar_one_or_none() if room else None
-        if not (room and me):
-            return await cq.answer("Нужно присоединиться", show_alert=True)
+        if not (room and me): return await cq.answer("Нужно присоединиться", show_alert=True)
         pair = (await s.execute(select(Pair).where(Pair.room_id==room.id, Pair.giver_id==me.id))).scalar_one_or_none()
-        if not pair:
-            return await cq.answer("Жеребьёвки ещё не было.", show_alert=True)
+        if not pair: return await cq.answer("Жеребьёвки ещё не было.", show_alert=True)
         recv = (await s.execute(select(Participant).where(Participant.id==pair.receiver_id))).scalar_one()
-
     query = wishes_to_query(recv.wishes, room.rule_amount_max or room.rule_amount_exact, room.rule_letter)
-
     if not AFF_TEMPLATES:
         return await send_menu(cq, "🛒 Партнёрские магазины не настроены. Задай ENV AFFILIATES_JSON.", main_kb(code, cq.from_user.id==room.owner_id))
-
     links = []
     for mk in AFF_TEMPLATES.keys():
         url = mk_aff_url(mk, query)
-        if url:
-            links.append((mk, url))
-
-    # логируем показ пунктов покупки как «псевдо-клик»
+        if url: links.append((mk, url))
     async with Session() as s:
-        s.add(AffiliateClick(
-            user_id=cq.from_user.id,
-            room_id=room.id,
-            marketplace=(AFF_PRIMARY or links[0][0]),
-            query=query,
-            target_user_id=recv.user_id
-        ))
+        s.add(AffiliateClick(user_id=cq.from_user.id, room_id=room.id, marketplace=(AFF_PRIMARY or links[0][0]), query=query, target_user_id=recv.user_id))
         await s.commit()
-
     kb = InlineKeyboardBuilder()
     for mk, url in links[:6]:
         kb.button(text=f"Перейти в {HUMAN_NAMES.get(mk, mk)}", url=url)
     kb.button(text="↩️ Назад", callback_data=f"room_open:{code}")
-
     await send_menu(cq, f"🛒 Поиск: <i>{query}</i>\nВыбери магазин:", kb.as_markup())
-
 
 # ----- Anonymous hints -----
 @dp.callback_query(F.data.startswith("hint_send:"))
@@ -1017,7 +941,8 @@ async def cb_room_draw(cq: CallbackQuery):
                     f"🎄 Твой получатель: <b>{recv.name}</b>{rules_text}\n"
                     f"Хотелки: {recv.wishes or 'не указаны'}"
                 )
-            except Exception: pass
+            except Exception:
+                pass
 
 @dp.callback_query(F.data.startswith("export_csv:"))
 async def cb_export_csv(cq: CallbackQuery):
@@ -1039,7 +964,9 @@ async def cb_export_csv(cq: CallbackQuery):
     await bot.send_document(cq.from_user.id, BufferedInputFile(data, filename=f"secret_santa_{code}.csv"))
     await cq.answer("Отправил CSV в личку")
 
-# ---------- Reminders ----------
+# =======================
+# Reminders
+# =======================
 async def reminder_loop():
     await asyncio.sleep(5)
     while True:
@@ -1058,7 +985,9 @@ async def reminder_loop():
                                 pass
         await asyncio.sleep(60)
 
-# ---------- Entrypoint ----------
+# =======================
+# Entrypoint
+# =======================
 async def main():
     await init_db()
     asyncio.create_task(reminder_loop())
@@ -1076,14 +1005,13 @@ async def main():
         print(f"Webhook listening on :{PORT}{webhook_path}")
         while True: await asyncio.sleep(3600)
     else:
-        # polling + health endpoint для Render
+        # polling + health endpoint + DB-lock
         from aiohttp import web
         info = await bot.get_webhook_info()
         if info.url:
             print("Drop foreign webhook:", info.url)
         await bot.delete_webhook(drop_pending_updates=True)
 
-        # ← новый блок: пытаемся захватить лок
         got = await acquire_runtime_lock()
         if not got:
             print("Another instance already holds the polling lock. Exiting.")
