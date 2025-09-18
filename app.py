@@ -5,6 +5,7 @@ import string
 import io
 import csv
 import json
+import hashlib
 import urllib.parse
 from datetime import datetime, timedelta, UTC
 from typing import List, Tuple, Optional, Set, Dict
@@ -130,6 +131,12 @@ class AuditLog(Base):
     room_code: Mapped[Optional[str]] = mapped_column(SAString(10), nullable=True)
     event: Mapped[str] = mapped_column(SAString(64))
     data_json: Mapped[Optional[str]] = mapped_column(SAString(2000), nullable=True)
+    
+class RuntimeLock(Base):
+    __tablename__ = "runtime_lock"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bot_token_hash: Mapped[str] = mapped_column(SAString(64), unique=True, index=True)
+    started_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
 
 class AffiliateClick(Base):
     __tablename__ = "aff_clicks"
@@ -163,6 +170,18 @@ def gen_code(n: int = 6) -> str:
     import secrets
     alphabet = string.ascii_uppercase + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(n))
+
+async def acquire_runtime_lock() -> bool:
+    token = os.environ.get("BOT_TOKEN","")
+    h = hashlib.sha256(token.encode()).hexdigest()
+    async with Session() as s:
+        s.add(RuntimeLock(bot_token_hash=h))
+        try:
+            await s.commit()
+            return True
+        except IntegrityError:
+            await s.rollback()
+            return False
 
 async def log(event: str, user_id: Optional[int] = None, room_code: Optional[str] = None, data: Optional[str] = None):
     async with Session() as s:
@@ -1052,6 +1071,12 @@ async def main():
         if info.url:
             print("Drop foreign webhook:", info.url)
         await bot.delete_webhook(drop_pending_updates=True)
+
+        # ← новый блок: пытаемся захватить лок
+        got = await acquire_runtime_lock()
+        if not got:
+            print("Another instance already holds the polling lock. Exiting.")
+            return
 
         app = web.Application()
         app.router.add_get("/health", lambda request: web.Response(text="ok"))
