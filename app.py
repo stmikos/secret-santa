@@ -13,7 +13,7 @@ from typing import List, Tuple, Optional, Set, Dict
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -387,19 +387,28 @@ async def re_prompt_for_state(m: Message, state: FSMContext):
         await show_main_menu(m)
 
 # ---------- Global return (works everywhere, no state clear) ----------
-@dp.message(F.text.in_({"🏠 Меню", "⬅️ Назад", "Отмена"}))
+@dp.message(StateFilter("*"), F.text.in_({"🏠 Меню", "⬅️ Назад", "Отмена", "/menu", "/cancel"}))
 async def go_main_any_state(m: Message, state: FSMContext):
+    # состояние НЕ чистим — чтобы можно было вернуться «✍️ Продолжить»
     await show_main_menu(m)
 
-@dp.callback_query(F.data == "to_main")
+@dp.callback_query(StateFilter("*"), F.data == "to_main")
 async def cb_to_main_any_state(cq: CallbackQuery, state: FSMContext):
     await show_main_menu(cq)
-    try: await cq.answer()
-    except Exception: pass
+    try:
+        await cq.answer()
+    except Exception:
+        pass
 
 @dp.message(F.text == "✍️ Продолжить")
 async def resume_input(m: Message, state: FSMContext):
     await re_prompt_for_state(m, state)
+    
+@dp.message(F.text == "/panic")
+async def panic_clear(m: Message, state: FSMContext):
+    await state.clear()
+    await send_single(m, "Состояние сброшено. Возвращаю в меню.", user_reply_kb(await get_user_active_room(m.from_user.id) is not None))
+    await show_main_menu(m)
 
 # ---------- Handlers ----------
 @dp.message(CommandStart())
@@ -531,13 +540,15 @@ async def on_hint_btn(m: Message, state: FSMContext):
     await state.set_state(SendHint.waiting_text)
     await send_single(m, "Напиши подсказку (анонимно отправим твоему получателю):", user_reply_kb(True))
 
-@dp.message(F.text == "🚪 Выйти из комнаты")
+@dp.message(StateFilter("*"), F.text == "🚪 Выйти из комнаты")
 async def on_leave_room(m: Message):
     room = await get_user_active_room(m.from_user.id)
     if not room:
         await send_single(m, "Комнат не найдено.", user_reply_kb(False)); return
     async with Session() as s:
-        me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
+        me = (await s.execute(
+            select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id)
+        )).scalar_one_or_none()
         if me:
             await s.delete(me); await s.commit()
     await send_single(m, "Ты вышел из комнаты. Можно присоединиться к другой или создать новую.", user_reply_kb(False))
