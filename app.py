@@ -4,6 +4,8 @@ import random
 import string
 import io
 import csv
+import json
+import urllib.parse
 from datetime import datetime, timedelta, UTC
 from typing import List, Tuple, Optional, Set, Dict
 
@@ -33,11 +35,41 @@ MAX_ROOMS_PER_OWNER = int(os.environ.get("MAX_ROOMS_PER_OWNER", "5"))
 MAX_PARTICIPANTS_PER_ROOM = int(os.environ.get("MAX_PARTICIPANTS_PER_ROOM", "200"))
 MAX_HINTS_PER_DAY = int(os.environ.get("MAX_HINTS_PER_DAY", "3"))
 
+# Affiliate config (JSON map marketplace->url template with {q})
+AFF_TEMPLATES: Dict[str, str] = {}
+try:
+    AFF_TEMPLATES = json.loads(os.environ.get("AFFILIATES_JSON", "{}"))
+except Exception:
+    AFF_TEMPLATES = {}
+AFF_PRIMARY = os.environ.get("AFF_PRIMARY") or (list(AFF_TEMPLATES.keys())[0] if AFF_TEMPLATES else None)
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is required")
 
+# ---------- Legal texts ----------
+TERMS_TEXT = (
+    "1) Кто мы: бот для «Тайного Санты» (Сервис).\n"
+    "2) Что делает: комнаты, хотелки, жеребьёвка, подсказки, напоминания, внешние ссылки на магазины.\n"
+    "3) Обязанности пользователя: не нарушать закон; уважать приватность; следовать правилам комнаты.\n"
+    "4) Ограничение ответственности: ссылки ведут на сторонние площадки; за товары и оплату отвечает продавец.\n"
+    "5) Оплата/Премиум: платные функции активируются после оплаты в Telegram; возвраты — по правилам Telegram/провайдера.\n"
+    "6) Аффилиатные ссылки: некоторые ссылки партнёрские; цена для вас не меняется.\n"
+    "7) Изменения условий: могут обновляться; актуальная версия — здесь (/terms).\n"
+    "8) Контакты: @your_handle, support@example.com."
+)
+PRIVACY_TEXT = (
+    "1) Данные: Telegram-ID, имя, хотелки, настройки комнат, служебные логи, агрегированные клики по внешним ссылкам.\n"
+    "2) Цели: работа сервиса (жеребьёвка/подсказки/напоминания), улучшение качества, отчёты организаторам.\n"
+    "3) Срок хранения: пока активна комната и 12 месяцев после — затем анонимизация/удаление; можно запросить удаление.\n"
+    "4) Передача третьим лицам: не передаём, кроме по закону и инфраструктуре (хостинг/БД) с обязательствами конфиденциальности.\n"
+    "5) Трекинг: в боте нет cookie; внешние сайты имеют свои политики.\n"
+    "6) Безопасность: принимаем меры, но нулевой риск не гарантируется.\n"
+    "7) Контакты: @your_handle, support@example.com."
+)
+
 # ---------- DB ----------
 class Base(DeclarativeBase): ...
+
 class Room(Base):
     __tablename__ = "rooms"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -97,6 +129,21 @@ class AuditLog(Base):
     event: Mapped[str] = mapped_column(SAString(64))
     data_json: Mapped[Optional[str]] = mapped_column(SAString(2000), nullable=True)
 
+class AffiliateClick(Base):
+    __tablename__ = "aff_clicks"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    room_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    marketplace: Mapped[str] = mapped_column(SAString(32))
+    query: Mapped[str] = mapped_column(SAString(256))
+    target_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+class Premium(Base):
+    __tablename__ = "premium"
+    user_id: Mapped[int] = mapped_column(primary_key=True)
+    until: Mapped[datetime] = mapped_column()
+
 # ---------- Engine ----------
 CONNECT_ARGS = {}
 if DATABASE_URL.startswith("postgresql+psycopg://"):
@@ -134,17 +181,12 @@ def draw_pairs(ids: List[int], forbidden: Set[Tuple[int, int]]) -> List[Tuple[in
         giver = ids[i]
         random.shuffle(receivers)
         for r in receivers:
-            if r == giver:
-                continue
-            if (giver, r) in forbidden:
-                continue
-            if r in assigned.values():
-                continue
-            if r in assigned and assigned.get(r) == giver:
-                continue  # prevent two-cycle
+            if r == giver: continue
+            if (giver, r) in forbidden: continue
+            if r in assigned.values(): continue
+            if r in assigned and assigned.get(r) == giver: continue  # prevent two-cycle
             assigned[giver] = r
-            if backtrack(i + 1):
-                return True
+            if backtrack(i + 1): return True
             assigned.pop(giver, None)
         return False
 
@@ -168,12 +210,30 @@ def make_rules_text(room: Room) -> str:
         "Общие правила:\n"
         "• Не раскрывай, кому даришь, до обмена 🎅\n"
         "• Уважай хотелки и табу получателя ✅\n"
-        "• Дедлайн — ориентир, не тяни до последнего ⏰\n"
+        "• Дедлайн — ориентир, но не тяни ⏰\n"
         "• Чеки не присылай, эмоции — присылай 🙂"
     )
     spec = "\n".join(rules) if rules else "• Дополнительных ограничений нет."
     extra = f"\n\nБюджет: <b>{room.budget or '—'}</b>\nДедлайн: <b>{room.deadline_at.date() if room.deadline_at else '—'}</b>"
     return f"{basics}\n\nСпец-правила комнаты:\n{spec}{extra}"
+
+def wishes_to_query(wishes: str, budget_max: Optional[int], letter: Optional[str]) -> str:
+    kw = wishes or ""
+    parts = [kw]
+    if budget_max: parts.append(f"до {budget_max} руб")
+    if letter: parts.append(f"на букву {letter}")
+    return ", ".join([p for p in parts if p]) or "подарок сюрприз"
+
+def mk_aff_url(marketplace: str, query: str) -> Optional[str]:
+    tpl = AFF_TEMPLATES.get(marketplace)
+    if not tpl: return None
+    q = urllib.parse.quote_plus(query.strip())
+    return tpl.replace("{q}", q)
+
+async def is_premium(user_id: int) -> bool:
+    async with Session() as s:
+        rec = (await s.execute(select(Premium).where(Premium.user_id == user_id))).scalar_one_or_none()
+    return bool(rec and rec.until > datetime.now(UTC))
 
 # ---------- Single-message UX (no piling) ----------
 _last_bot_msg: Dict[int, int] = {}  # chat_id -> message_id
@@ -190,10 +250,8 @@ async def send_single(m: Message | CallbackQuery, text: str, reply_markup: Optio
         except Exception:
             pass
     if isinstance(m, CallbackQuery):
-        try:
-            await m.answer()
-        except Exception:
-            pass
+        try: await m.answer()
+        except Exception: pass
     return sent
 
 async def send_menu(m: Message | CallbackQuery, text: str, kb: InlineKeyboardMarkup):
@@ -233,6 +291,8 @@ def main_kb(room_code: Optional[str] = None, is_owner: bool = False) -> InlineKe
         kb.button(text="✏️ Мои хотелки", callback_data=f"me_edit:{room_code}")
         kb.button(text="📨 Получатель", callback_data=f"me_target:{room_code}")
         kb.button(text="🕵️ Подсказка получателю", callback_data=f"hint_send:{room_code}")
+        kb.button(text="🎁 Идеи подарков", callback_data=f"ideas:{room_code}")
+        kb.button(text="🛒 Купить подарок", callback_data=f"buy:{room_code}")
         if is_owner:
             kb.button(text="🎲 Жеребьёвка", callback_data=f"room_draw:{room_code}")
             kb.button(text="⚙️ Настройки", callback_data=f"room_settings:{room_code}")
@@ -248,6 +308,7 @@ def user_reply_kb(in_room: bool) -> ReplyKeyboardMarkup:
                 [KeyboardButton(text="▶️ Старт")],
                 [KeyboardButton(text="🔗 Присоединиться"), KeyboardButton(text="➕ Создать")],
                 [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="ℹ️ Помощь")],
+                [KeyboardButton(text="⭐ Премиум")],
             ],
             resize_keyboard=True
         )
@@ -255,8 +316,10 @@ def user_reply_kb(in_room: bool) -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="🏠 Меню"), KeyboardButton(text="ℹ️ Правила")],
             [KeyboardButton(text="📝 Хотелки"), KeyboardButton(text="📨 Получатель")],
+            [KeyboardButton(text="🎁 Идеи"), KeyboardButton(text="🛒 Купить")],
             [KeyboardButton(text="🕵️ Подсказка"), KeyboardButton(text="🚪 Выйти из комнаты")],
             [KeyboardButton(text="✍️ Продолжить"), KeyboardButton(text="👤 Профиль")],
+            [KeyboardButton(text="⭐ Премиум")],
         ],
         resize_keyboard=True
     )
@@ -310,10 +373,8 @@ async def go_main_any_state(m: Message, state: FSMContext):
 @dp.callback_query(F.data == "to_main", state="*")
 async def cb_to_main_any_state(cq: CallbackQuery, state: FSMContext):
     await show_main_menu(cq)
-    try:
-        await cq.answer()
-    except Exception:
-        pass
+    try: await cq.answer()
+    except Exception: pass
 
 @dp.message(F.text == "✍️ Продолжить", state="*")
 async def resume_input(m: Message, state: FSMContext):
@@ -343,8 +404,8 @@ async def on_start_btn(m: Message):
 async def on_create_btn(m: Message):
     async with Session() as s:
         active_count = (await s.execute(select(func.count()).select_from(Room).where(Room.owner_id == m.from_user.id))).scalar()
-        if active_count >= MAX_ROOMS_PER_OWNER:
-            await send_single(m, f"Лимит комнат исчерпан ({MAX_ROOMS_PER_OWNER}).", user_reply_kb(False)); return
+        if active_count >= MAX_ROOMS_PER_OWNER and not await is_premium(m.from_user.id):
+            await send_single(m, f"Лимит комнат исчерпан ({MAX_ROOMS_PER_OWNER}). ⭐ Получи Премиум для расширения.", user_reply_kb(False)); return
     code = gen_code()
     async with Session() as s:
         s.add(Room(code=code, owner_id=m.from_user.id)); await s.commit()
@@ -406,6 +467,40 @@ async def on_target_btn(m: Message):
         recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
     await send_single(m, f"Ты даришь: <b>{recv.name}</b>\nХотелки: {recv.wishes or 'не указаны'}", user_reply_kb(True))
 
+@dp.message(F.text == "🎁 Идеи")
+async def ideas_reply(m: Message):
+    room = await get_user_active_room(m.from_user.id)
+    if not room:
+        return await send_single(m, "Сначала зайди в комнату.", user_reply_kb(False))
+    await enter_room_menu(m, room.code)
+
+@dp.message(F.text == "🛒 Купить")
+async def buy_reply(m: Message):
+    room = await get_user_active_room(m.from_user.id)
+    if not room:
+        return await send_single(m, "Сначала зайди в комнату.", user_reply_kb(False))
+    await enter_room_menu(m, room.code)
+
+@dp.message(F.text.in_({"⭐ Премиум", "/premium"}))
+async def premium_info(m: Message):
+    in_room = await get_user_active_room(m.from_user.id) is not None
+    await send_single(m,
+      "⭐ <b>Премиум</b> открывает:\n"
+      "• Больше комнат и участников\n"
+      "• Челлендж-правила, подсказки без лимита\n"
+      "• Корпоративный режим, экспорт CSV\n\n"
+      "Оплата через Telegram. Напиши @your_handle для активации (в демо — заглушка).",
+      user_reply_kb(in_room)
+    )
+
+@dp.message(F.text.in_({"/terms","/privacy"}))
+async def legal(m: Message):
+    in_room = await get_user_active_room(m.from_user.id) is not None
+    if m.text == "/terms":
+        await send_single(m, "Пользовательское соглашение:\n\n"+TERMS_TEXT, user_reply_kb(in_room))
+    else:
+        await send_single(m, "Политика конфиденциальности:\n\n"+PRIVACY_TEXT, user_reply_kb(in_room))
+
 @dp.message(F.text == "🕵️ Подсказка")
 async def on_hint_btn(m: Message, state: FSMContext):
     room = await get_user_active_room(m.from_user.id)
@@ -437,8 +532,7 @@ async def on_profile(m: Message):
             last_room = (await s.execute(select(Room).where(Room.id == parts[-1].room_id))).scalar_one_or_none()
         since = datetime.now(UTC) - timedelta(days=1)
         p_ids = [p.id for p in parts]
-        hints_today = 0
-        hints_total = 0
+        hints_today = hints_total = 0
         if p_ids:
             hints_today = (await s.execute(
                 select(func.count()).select_from(Hint).where(Hint.sender_participant_id.in_(p_ids), Hint.created_at >= since)
@@ -461,6 +555,7 @@ async def on_profile(m: Message):
     await send_single(m, text, user_reply_kb(in_room))
 
 # --------- Join flow (FSM) ----------
+class StatesJoin(StatesGroup): ...
 @dp.message(Join.name)
 async def on_name(m: Message, state: FSMContext):
     await state.update_data(name=(m.text or "").strip()[:64])
@@ -474,7 +569,8 @@ async def on_wishes(m: Message, state: FSMContext):
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
         count = (await s.execute(select(func.count()).select_from(Participant).where(Participant.room_id == room.id))).scalar()
-        if count >= MAX_PARTICIPANTS_PER_ROOM:
+        limit = MAX_PARTICIPANTS_PER_ROOM if (await is_premium(room.owner_id)) else MAX_PARTICIPANTS_PER_ROOM
+        if count >= limit:
             await state.clear()
             await send_single(m, "Достигнут лимит участников для этой комнаты.", user_reply_kb(False)); return
         p = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
@@ -494,8 +590,8 @@ async def on_wishes(m: Message, state: FSMContext):
 async def cb_room_new(cq: CallbackQuery):
     async with Session() as s:
         active_count = (await s.execute(select(func.count()).select_from(Room).where(Room.owner_id == cq.from_user.id))).scalar()
-        if active_count >= MAX_ROOMS_PER_OWNER:
-            await cq.answer(f"Лимит комнат исчерпан ({MAX_ROOMS_PER_OWNER}).", show_alert=True); return
+        if active_count >= MAX_ROOMS_PER_OWNER and not await is_premium(cq.from_user.id):
+            await cq.answer(f"Лимит комнат исчерпан ({MAX_ROOMS_PER_OWNER}). ⭐ Премиум расширит лимиты.", show_alert=True); return
     code = gen_code()
     async with Session() as s:
         s.add(Room(code=code, owner_id=cq.from_user.id)); await s.commit()
@@ -579,6 +675,51 @@ async def cb_me_target(cq: CallbackQuery):
         recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
     await send_menu(cq, f"Ты даришь: <b>{recv.name}</b>", main_kb(code, cq.from_user.id == room.owner_id))
 
+# ----- Ideas & Buy (affiliates) -----
+@dp.callback_query(F.data.startswith("ideas:"))
+async def cb_ideas(cq: CallbackQuery):
+    code = cq.data.split(":",1)[1]
+    async with Session() as s:
+        room = (await s.execute(select(Room).where(Room.code==code))).scalar_one_or_none()
+        me = (await s.execute(select(Participant).where(Participant.room_id==room.id, Participant.user_id==cq.from_user.id))).scalar_one_or_none() if room else None
+        if not (room and me): return await cq.answer("Нужно присоединиться", show_alert=True)
+        pair = (await s.execute(select(Pair).where(Pair.room_id==room.id, Pair.giver_id==me.id))).scalar_one_or_none()
+        if not pair: return await cq.answer("Жеребьёвки ещё не было.", show_alert=True)
+        recv = (await s.execute(select(Participant).where(Participant.id==pair.receiver_id))).scalar_one()
+    query = wishes_to_query(recv.wishes, room.rule_amount_max or room.rule_amount_exact, room.rule_letter)
+    txt = (f"🎁 Идеи по хотелкам <b>{recv.name}</b>:\n"
+           f"• Категории: {recv.wishes or 'не указаны'}\n"
+           f"• Бюджет: {room.rule_amount_exact or ('до '+str(room.rule_amount_max)+'₽' if room.rule_amount_max else room.budget or '—')}\n\n"
+           f"Нажми «🛒 Купить» — подберём ссылки.")
+    await send_menu(cq, txt, main_kb(code, cq.from_user.id==room.owner_id))
+
+@dp.callback_query(F.data.startswith("buy:"))
+async def cb_buy(cq: CallbackQuery):
+    code = cq.data.split(":",1)[1]
+    async with Session() as s:
+        room = (await s.execute(select(Room).where(Room.code==code))).scalar_one_or_none()
+        me = (await s.execute(select(Participant).where(Participant.room_id==room.id, Participant.user_id==cq.from_user.id))).scalar_one_or_none() if room else None
+        if not (room and me): return await cq.answer("Нужно присоединиться", show_alert=True)
+        pair = (await s.execute(select(Pair).where(Pair.room_id==room.id, Pair.giver_id==me.id))).scalar_one_or_none()
+        if not pair: return await cq.answer("Жеребьёвки ещё не было.", show_alert=True)
+        recv = (await s.execute(select(Participant).where(Participant.id==pair.receiver_id))).scalar_one()
+    query = wishes_to_query(recv.wishes, room.rule_amount_max or room.rule_amount_exact, room.rule_letter)
+    if not AFF_TEMPLATES:
+        return await send_menu(cq, "🛒 Партнёрские магазины не настроены. Задай ENV AFFILIATES_JSON.", main_kb(code, cq.from_user.id==room.owner_id))
+    links = []
+    for mk in AFF_TEMPLATES.keys():
+        url = mk_aff_url(mk, query)
+        if url: links.append((mk, url))
+    # log synthetic click event (menu exposure)
+    async with Session() as s:
+        s.add(AffiliateClick(user_id=cq.from_user.id, room_id=room.id, marketplace=(AFF_PRIMARY or links[0][0]), query=query, target_user_id=recv.user_id))
+        await s.commit()
+    kb = InlineKeyboardBuilder()
+    for mk, url in links[:6]:
+        kb.button(text=f"Перейти в {mk.upper()}", url=url)
+    kb.button(text="↩️ Назад", callback_data=f"room_open:{code}")
+    await send_menu(cq, f"🛒 Поиск: <i>{query}</i>\nВыбери магазин:", kb.as_markup())
+
 # ----- Anonymous hints -----
 @dp.callback_query(F.data.startswith("hint_send:"))
 async def cb_hint_send(cq: CallbackQuery, state: FSMContext):
@@ -593,7 +734,7 @@ async def cb_hint_send(cq: CallbackQuery, state: FSMContext):
         if not pair: await cq.answer("Жеребьёвки ещё не было.", show_alert=True); return
         since = datetime.now(UTC) - timedelta(days=1)
         cnt = (await s.execute(select(sfunc.count()).select_from(Hint).where(Hint.room_id == room.id, Hint.sender_participant_id == me.id, Hint.created_at >= since))).scalar()
-        if cnt >= MAX_HINTS_PER_DAY: await cq.answer("Лимит подсказок на сегодня исчерпан", show_alert=True); return
+        if cnt >= MAX_HINTS_PER_DAY and not await is_premium(cq.from_user.id): await cq.answer("Лимит подсказок на сегодня исчерпан", show_alert=True); return
     await state.set_state(SendHint.waiting_text)
     await send_menu(cq, "Напиши подсказку (анонимно отправим твоему получателю):", InlineKeyboardMarkup(inline_keyboard=[]))
 
