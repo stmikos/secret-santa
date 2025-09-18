@@ -43,6 +43,9 @@ except Exception:
     AFF_TEMPLATES = {}
 AFF_PRIMARY = os.environ.get("AFF_PRIMARY") or (list(AFF_TEMPLATES.keys())[0] if AFF_TEMPLATES else None)
 
+# Читали AFF_TEMPLATES / AFF_PRIMARY выше
+HUMAN_NAMES = {"wb": "Wildberries", "ozon": "Ozon", "ym": "Яндекс.Маркет"}
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is required")
 
@@ -716,7 +719,7 @@ async def cb_buy(cq: CallbackQuery):
         await s.commit()
     kb = InlineKeyboardBuilder()
     for mk, url in links[:6]:
-        kb.button(text=f"Перейти в {mk.upper()}", url=url)
+    kb.button(text=f"Перейти в {HUMAN_NAMES.get(mk, mk)}", url=url)
     kb.button(text="↩️ Назад", callback_data=f"room_open:{code}")
     await send_menu(cq, f"🛒 Поиск: <i>{query}</i>\nВыбери магазин:", kb.as_markup())
 
