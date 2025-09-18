@@ -42,7 +42,6 @@ try:
 except Exception:
     AFF_TEMPLATES = {}
 AFF_PRIMARY = os.environ.get("AFF_PRIMARY") or (list(AFF_TEMPLATES.keys())[0] if AFF_TEMPLATES else None)
-
 # Читали AFF_TEMPLATES / AFF_PRIMARY выше
 HUMAN_NAMES = {"wb": "Wildberries", "ozon": "Ozon", "ym": "Яндекс.Маркет"}
 
@@ -369,17 +368,17 @@ async def re_prompt_for_state(m: Message, state: FSMContext):
         await show_main_menu(m)
 
 # ---------- Global return (works everywhere, no state clear) ----------
-@dp.message(F.text.in_({"🏠 Меню", "⬅️ Назад", "Отмена"}), state="*")
+@dp.message(F.text.in_({"🏠 Меню", "⬅️ Назад", "Отмена"}))
 async def go_main_any_state(m: Message, state: FSMContext):
     await show_main_menu(m)
 
-@dp.callback_query(F.data == "to_main", state="*")
+@dp.callback_query(F.data == "to_main")
 async def cb_to_main_any_state(cq: CallbackQuery, state: FSMContext):
     await show_main_menu(cq)
     try: await cq.answer()
     except Exception: pass
 
-@dp.message(F.text == "✍️ Продолжить", state="*")
+@dp.message(F.text == "✍️ Продолжить")
 async def resume_input(m: Message, state: FSMContext):
     await re_prompt_for_state(m, state)
 
@@ -702,26 +701,42 @@ async def cb_buy(cq: CallbackQuery):
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code==code))).scalar_one_or_none()
         me = (await s.execute(select(Participant).where(Participant.room_id==room.id, Participant.user_id==cq.from_user.id))).scalar_one_or_none() if room else None
-        if not (room and me): return await cq.answer("Нужно присоединиться", show_alert=True)
+        if not (room and me):
+            return await cq.answer("Нужно присоединиться", show_alert=True)
         pair = (await s.execute(select(Pair).where(Pair.room_id==room.id, Pair.giver_id==me.id))).scalar_one_or_none()
-        if not pair: return await cq.answer("Жеребьёвки ещё не было.", show_alert=True)
+        if not pair:
+            return await cq.answer("Жеребьёвки ещё не было.", show_alert=True)
         recv = (await s.execute(select(Participant).where(Participant.id==pair.receiver_id))).scalar_one()
+
     query = wishes_to_query(recv.wishes, room.rule_amount_max or room.rule_amount_exact, room.rule_letter)
+
     if not AFF_TEMPLATES:
         return await send_menu(cq, "🛒 Партнёрские магазины не настроены. Задай ENV AFFILIATES_JSON.", main_kb(code, cq.from_user.id==room.owner_id))
+
     links = []
     for mk in AFF_TEMPLATES.keys():
         url = mk_aff_url(mk, query)
-        if url: links.append((mk, url))
-    # log synthetic click event (menu exposure)
+        if url:
+            links.append((mk, url))
+
+    # логируем показ пунктов покупки как «псевдо-клик»
     async with Session() as s:
-        s.add(AffiliateClick(user_id=cq.from_user.id, room_id=room.id, marketplace=(AFF_PRIMARY or links[0][0]), query=query, target_user_id=recv.user_id))
+        s.add(AffiliateClick(
+            user_id=cq.from_user.id,
+            room_id=room.id,
+            marketplace=(AFF_PRIMARY or links[0][0]),
+            query=query,
+            target_user_id=recv.user_id
+        ))
         await s.commit()
+
     kb = InlineKeyboardBuilder()
     for mk, url in links[:6]:
-    kb.button(text=f"Перейти в {HUMAN_NAMES.get(mk, mk)}", url=url)
+        kb.button(text=f"Перейти в {HUMAN_NAMES.get(mk, mk)}", url=url)
     kb.button(text="↩️ Назад", callback_data=f"room_open:{code}")
+
     await send_menu(cq, f"🛒 Поиск: <i>{query}</i>\nВыбери магазин:", kb.as_markup())
+
 
 # ----- Anonymous hints -----
 @dp.callback_query(F.data.startswith("hint_send:"))
