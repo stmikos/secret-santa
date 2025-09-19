@@ -234,28 +234,31 @@ class Join(StatesGroup):
 
 # 1) Главный вызов меню всегда через Reply-клавиатуру
 def kb_root(in_room: bool) -> ReplyKeyboardMarkup:
+    base_rows = [
+        [KeyboardButton(text="➕ Создать"), KeyboardButton(text="🔗 Присоединиться")],
+        [KeyboardButton(text="ℹ️ Правила"), KeyboardButton(text="📰 Новости")],
+    ]
+
     if not in_room:
+        keyboard = [[KeyboardButton(text="▶️ Старт")]] + base_rows + [[KeyboardButton(text="👤 Профиль")]]
         return ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="▶️ Старт")],
-                [KeyboardButton(text="➕ Создать"), KeyboardButton(text="🔗 Присоединиться")],
-                [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="ℹ️ Правила")],
-            ],
+            keyboard=keyboard,
             resize_keyboard=True,
             one_time_keyboard=False,
-            input_field_placeholder="Нажми «▶️ Старт» или создай/введи комнату"
+            input_field_placeholder="Нажми «▶️ Старт» или создай/введи комнату",
         )
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🏠 Меню"), KeyboardButton(text="ℹ️ Правила")],
-            [KeyboardButton(text="📝 Хотелки"), KeyboardButton(text="📨 Получатель")],
-            [KeyboardButton(text="🎁 Идеи"), KeyboardButton(text="🛒 Купить")],
-            [KeyboardButton(text="🚪 Выйти из комнаты")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False
-    )
 
+    keyboard = [[KeyboardButton(text="🏠 Меню")]] + base_rows + [
+        [KeyboardButton(text="📝 Хотелки"), KeyboardButton(text="📨 Получатель")],
+        [KeyboardButton(text="🎁 Идеи"), KeyboardButton(text="🛒 Купить")],
+        [KeyboardButton(text="🚪 Выйти из комнаты")],
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+    
 async def show_main(m: Message | CallbackQuery):
     room = await get_user_active_room(m.from_user.id)
     in_room = bool(room)
@@ -304,11 +307,14 @@ async def cb_to_main(cq: CallbackQuery, state: FSMContext):
     await show_main(cq)
 
 # Start
-@dp.message(CommandStart())
-async def start(m: Message):
+@dp.message(CommandStart())   # /start
+async def on_cmd_start(m: Message, state: FSMContext):
+    await state.clear()
+    # поддержка deep-link ?start=room_XXXX
     payload = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
     if payload.startswith("room_"):
-        await enter_room_menu(m, payload.removeprefix("room_")); return
+        await enter_room_menu(m, payload.removeprefix("room_"))
+        return
     await show_main(m)
 
 # Create room
@@ -325,18 +331,6 @@ async def on_create_btn(m: Message):
     link = f"https://t.me/{me.username}?start=room_{code}"
     await m.answer(f"Комната создана: <code>{code}</code>\nПриглашение: {link}", reply_markup=kb_root(True))
     await enter_room_menu(m, code)
-# 2) Старт реагирует и на /start, и на «Старт», и на «▶️ Старт»
-from aiogram.filters import Command
-
-@dp.message(CommandStart())   # /start
-async def on_cmd_start(m: Message, state: FSMContext):
-    await state.clear()
-    # поддержка deep-link ?start=room_XXXX
-    payload = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
-    if payload.startswith("room_"):
-        await enter_room_menu(m, payload.removeprefix("room_"))
-        return
-    await show_main(m)
 
 @dp.message(F.text.lower().in_({"старт", "start", "▶️ старт", "▶️ start"}))
 async def on_text_start(m: Message, state: FSMContext):
@@ -461,8 +455,10 @@ GENERAL_RULES = (
 @dp.message(F.text == "ℹ️ Правила")
 async def rules_btn(m: Message):
     room = await get_user_active_room(m.from_user.id)
-    if not room: await m.answer("Ты ещё не в комнате", reply_markup=kb_root(False)); return
-    await m.answer(mk_rules(room), reply_markup=kb_root(True))
+    if room:
+        await m.answer(mk_rules(room), reply_markup=kb_root(True))
+    else:
+        await m.answer(GENERAL_RULES, reply_markup=kb_root(False))
 
 @dp.message(F.text == "📝 Хотелки")
 async def wishes_btn(m: Message, state: FSMContext):
@@ -483,14 +479,6 @@ async def target_btn(m: Message):
         if not pair: await m.answer("Жеребьёвки ещё не было", reply_markup=kb_root(True)); return
         recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
     await m.answer(f"Ты даришь: <b>{recv.name}</b>\nХотелки: {recv.wishes or 'не указаны'}", reply_markup=kb_root(True))
-
-@dp.message(F.text == "ℹ️ Правила")
-async def on_rules(m: Message):
-    room = await get_user_active_room(m.from_user.id)
-    if room:
-        await m.answer(mk_rules(room), reply_markup=kb_root(True))
-    else:
-        await m.answer(GENERAL_RULES, reply_markup=kb_root(False))
 
 @dp.message(F.text == "📰 Новости")
 async def on_news(m: Message):
