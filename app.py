@@ -232,17 +232,18 @@ class Join(StatesGroup):
     name = State()
     wishes = State()
 
-# Reply keyboards (простые)
+# 1) Главный вызов меню всегда через Reply-клавиатуру
 def kb_root(in_room: bool) -> ReplyKeyboardMarkup:
     if not in_room:
         return ReplyKeyboardMarkup(
             keyboard=[
+                [KeyboardButton(text="▶️ Старт")],
                 [KeyboardButton(text="➕ Создать"), KeyboardButton(text="🔗 Присоединиться")],
                 [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="ℹ️ Правила")],
             ],
             resize_keyboard=True,
             one_time_keyboard=False,
-            input_field_placeholder="Создай комнату или присоединись по коду"
+            input_field_placeholder="Нажми «▶️ Старт» или создай/введи комнату"
         )
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -254,6 +255,12 @@ def kb_root(in_room: bool) -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=False
     )
+
+async def show_main(m: Message | CallbackQuery):
+    room = await get_user_active_room(m.from_user.id)
+    in_room = bool(room)
+    await send_single(m, "Главное меню", kb_root(in_room))
+
 
 
 # Inline keyboards
@@ -285,12 +292,6 @@ async def send_single(m: Message | CallbackQuery, text: str, kb: InlineKeyboardM
         return await m.answer(text, reply_markup=kb)
 
 import contextlib
-
-async def show_main(m: Message | CallbackQuery):
-    room = await get_user_active_room(m.from_user.id)
-    in_room = bool(room)
-    # Всегда показываем Reply-клавиатуру (видимые большие кнопки)
-    await send_single(m, "Главное меню", kb_root(in_room))
 
 @dp.message(StateFilter("*"), F.text.in_({"🏠 Меню", "⬅️ Назад", "Отмена", "/menu"}))
 async def any_to_menu(m: Message, state: FSMContext):
@@ -324,6 +325,28 @@ async def create_room_btn(m: Message):
     link = f"https://t.me/{me.username}?start=room_{code}"
     await m.answer(f"Комната создана: <code>{code}</code>\nПриглашение: {link}", reply_markup=kb_root(True))
     await enter_room_menu(m, code)
+# 2) Старт реагирует и на /start, и на «Старт», и на «▶️ Старт»
+from aiogram.filters import Command
+
+@dp.message(CommandStart())   # /start
+async def on_cmd_start(m: Message, state: FSMContext):
+    await state.clear()
+    # поддержка deep-link ?start=room_XXXX
+    payload = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
+    if payload.startswith("room_"):
+        await enter_room_menu(m, payload.removeprefix("room_"))
+        return
+    await show_main(m)
+
+@dp.message(F.text.lower().in_({"старт", "start", "▶️ старт", "▶️ start"}))
+async def on_text_start(m: Message, state: FSMContext):
+    await state.clear()
+    await show_main(m)
+
+@dp.message(F.text == "🏠 Меню")
+async def on_home_btn(m: Message, state: FSMContext):
+    await state.clear()
+    await show_main(m)
 
 # Join flow
 @dp.message(F.text == "🔗 Присоединиться")
