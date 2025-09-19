@@ -313,7 +313,7 @@ async def start(m: Message):
 
 # Create room
 @dp.message(F.text == "➕ Создать")
-async def create_room_btn(m: Message):
+async def on_create_btn(m: Message):
     async with Session() as s:
         cnt = (await s.execute(select(func.count()).select_from(Room).where(Room.owner_id == m.from_user.id))).scalar()
         if cnt >= MAX_ROOMS_PER_OWNER:
@@ -350,7 +350,7 @@ async def on_home_btn(m: Message, state: FSMContext):
 
 # Join flow
 @dp.message(F.text == "🔗 Присоединиться")
-async def join_btn(m: Message, state: FSMContext):
+async def on_join_btn(m: Message, state: FSMContext):
     await state.update_data(wait_code=True)
     await m.answer("Введи код комнаты (например: ABC123)")
 
@@ -450,6 +450,14 @@ async def cb_participants(cq: CallbackQuery):
     await send_single(cq, f"Участники ({len(rows)}):\n{names}", main_kb(code, room.owner_id==cq.from_user.id))
 
 # Rules / wishes / recipient
+GENERAL_RULES = (
+    "Правила игры:\n"
+    "• Не раскрывай, кому даришь, до обмена 🎅\n"
+    "• Уважай хотелки и табу получателя ✅\n"
+    "• Соблюдай дедлайн ⏰\n"
+    "• Дарим эмоции, а не аргументы из бухгалтерии 🙂"
+)
+
 @dp.message(F.text == "ℹ️ Правила")
 async def rules_btn(m: Message):
     room = await get_user_active_room(m.from_user.id)
@@ -475,6 +483,26 @@ async def target_btn(m: Message):
         if not pair: await m.answer("Жеребьёвки ещё не было", reply_markup=kb_root(True)); return
         recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
     await m.answer(f"Ты даришь: <b>{recv.name}</b>\nХотелки: {recv.wishes or 'не указаны'}", reply_markup=kb_root(True))
+
+@dp.message(F.text == "ℹ️ Правила")
+async def on_rules(m: Message):
+    room = await get_user_active_room(m.from_user.id)
+    if room:
+        await m.answer(mk_rules(room), reply_markup=kb_root(True))
+    else:
+        await m.answer(GENERAL_RULES, reply_markup=kb_root(False))
+
+@dp.message(F.text == "📰 Новости")
+async def on_news(m: Message):
+    # простая заглушка новостей — можно подменить на реальную рассылку/канал
+    await m.answer(
+        "Новости бота:\n"
+        "• Добавлены подсказки «Санта → получателю»\n"
+        "• Челлендж-правила (буква, сумма)\n"
+        "• Интеграции с маркетплейсами (WB/Ozon/Я.Маркет)\n"
+        "• Экспорт CSV и корпоративный режим",
+        reply_markup=kb_root(False if not await get_user_active_room(m.from_user.id) else True)
+    )
 
 # Draw
 @dp.callback_query(F.data.startswith("room_draw:"))
