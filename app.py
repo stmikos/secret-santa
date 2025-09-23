@@ -249,7 +249,6 @@ def kb_root(in_room: bool) -> ReplyKeyboardMarkup:
         )
 
     keyboard = [[KeyboardButton(text="🏠 Меню")]] + base_rows + [
-        [KeyboardButton(text="📝 Хотелки"), KeyboardButton(text="📨 Получатель")],
         [KeyboardButton(text="🎁 Идеи"), KeyboardButton(text="🛒 Купить")],
         [KeyboardButton(text="🚪 Выйти из комнаты")],
     ]
@@ -374,14 +373,18 @@ async def join_wishes(m: Message, state: FSMContext):
     code = data["room_code"]
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
-        count = (await s.execute(select(func.count()).select_from(Participant).where(Participant.room_id == room.id))).scalar()
-        if count >= MAX_PARTICIPANTS_PER_ROOM:
-            await state.clear(); await m.answer("Лимит участников достигнут"); return
-        me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
+                me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
+         if not me:
+            count = (await s.execute(select(func.count()).select_from(Participant).where(Participant.room_id == room.id))).scalar()
+            if count >= MAX_PARTICIPANTS_PER_ROOM:
+                await state.clear(); await m.answer("Лимит участников достигнут"); return
+        name = data.get("name") or (me.name if me else None)
+        if not name:
+            await state.clear(); await m.answer("Сначала представься", reply_markup=kb_root(False)); return
         if me:
-            me.name = data["name"]; me.wishes = (m.text or "")[:512]
+            me.name = name; me.wishes = (m.text or "")[:512]
         else:
-            s.add(Participant(room_id=room.id, user_id=m.from_user.id, name=data["name"], wishes=(m.text or "")[:512]))
+            s.add(Participant(room_id=room.id, user_id=m.from_user.id, name=name, wishes=(m.text or "")[:512]))
         await s.commit()
     await state.clear()
     await m.answer("Записал. Но свечку всё равно подарят 😏", reply_markup=kb_root(True))
@@ -464,7 +467,11 @@ async def rules_btn(m: Message):
 async def wishes_btn(m: Message, state: FSMContext):
     room = await get_user_active_room(m.from_user.id)
     if not room: await m.answer("Сначала присоединись", reply_markup=kb_root(False)); return
-    await state.update_data(room_code=room.code)
+     async with Session() as s:
+        me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
+    if not me: await m.answer("Ты ещё не в комнате", reply_markup=kb_root(False)); return
+    await state.clear()
+    await state.update_data(room_code=room.code, name=me.name)
     await state.set_state(Join.wishes)
     await m.answer("Напиши свои хотелки/табу:")
 
@@ -472,13 +479,56 @@ async def wishes_btn(m: Message, state: FSMContext):
 async def target_btn(m: Message):
     room = await get_user_active_room(m.from_user.id)
     if not room: await m.answer("Сначала присоединись", reply_markup=kb_root(False)); return
-    async with Session() as s:
+async with Session() as s:
         me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
         if not me: await m.answer("Ты ещё не в комнате", reply_markup=kb_root(False)); return
         pair = (await s.execute(select(Pair).where(Pair.room_id == room.id, Pair.giver_id == me.id))).scalar_one_or_none()
         if not pair: await m.answer("Жеребьёвки ещё не было", reply_markup=kb_root(True)); return
         recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
     await m.answer(f"Ты даришь: <b>{recv.name}</b>\nХотелки: {recv.wishes or 'не указаны'}", reply_markup=kb_root(True))
+
+@dp.callback_query(F.data.startswith("me_target:"))
+async def cb_me_target(cq: CallbackQuery):
+    code = cq.data.split(":", 1)[1]
+    async with Session() as s:
+        room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
+        me = None
+        if room:
+            me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == cq.from_user.id))).scalar_one_or_none()
+            pair = None
+            if me:
+                pair = (await s.execute(select(Pair).where(Pair.room_id == room.id, Pair.giver_id == me.id))).scalar_one_or_none()
+                recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one() if pair else None
+    if not room:
+        await cq.answer("Комната не найдена", show_alert=True); return
+    if not me:
+        await cq.answer("Нужно присоединиться", show_alert=True); return
+    if not pair:
+        await send_single(cq, "Жеребьёвки ещё не было", main_kb(code, room.owner_id == cq.from_user.id))
+        return
+    await send_single(
+        cq,
+        f"Ты даришь: <b>{recv.name}</b>\nХотелки: {recv.wishes or 'не указаны'}",
+        main_kb(code, room.owner_id == cq.from_user.id),
+    )
+    
+@dp.callback_query(F.data.startswith("me_edit:"))
+async def cb_me_edit(cq: CallbackQuery, state: FSMContext):
+    code = cq.data.split(":", 1)[1]
+    async with Session() as s:
+        room = (await s.execute(select(Room).where(Room.code == code))).scalar_one_or_none()
+        me = None
+        if room:
+            me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == cq.from_user.id))).scalar_one_or_none()
+    if not room:
+        await cq.answer("Комната не найдена", show_alert=True); return
+    if not me:
+        await cq.answer("Нужно присоединиться", show_alert=True); return
+    await state.clear()
+    await state.update_data(room_code=room.code, name=me.name)
+    await state.set_state(Join.wishes)
+    await cq.message.answer("Напиши свои хотелки/табу:")
+    await cq.answer()
 
 @dp.message(F.text == "📰 Новости")
 async def on_news(m: Message):
