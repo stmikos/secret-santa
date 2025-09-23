@@ -728,30 +728,55 @@ async def main():
     asyncio.create_task(reminder_loop())
 
     if WEBHOOK_URL:
+        # --- WEBHOOK MODE ---
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
         from aiohttp import web
+
         app = web.Application()
         SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
         setup_application(app, dp, bot=bot)
         await bot.set_webhook(WEBHOOK_URL + "/webhook", drop_pending_updates=True)
-        runner = web.AppRunner(app); await runner.setup()
-        site = web.TCPSite(runner, host="0.0.0.0", port=PORT); await site.start()
-        while True: await asyncio.sleep(3600)
-    else:
-        from aiohttp import web
-        info = await bot.get_webhook_info()
-        if info.url: await bot.delete_webhook(drop_pending_updates=True)
 
-               got = await acquire_runtime_lock()
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
+        await site.start()
+
+        try:
+            # держим процесс живым
+            while True:
+                await asyncio.sleep(3600)
+        finally:
+            with contextlib.suppress(Exception):
+                await runner.cleanup()
+            with contextlib.suppress(Exception):
+                await bot.session.close()
+    else:
+        # --- POLLING MODE + HEALTH ---
+        from aiohttp import web
+
+        # гарантированно выключаем чужой вебхук
+        info = await bot.get_webhook_info()
+        if info.url:
+            await bot.delete_webhook(drop_pending_updates=True)
+
+        got = await acquire_runtime_lock()
         if not got:
             print("Another instance already holds the polling lock. Exiting.")
-            await bot.session.close()  # <<< важно
+            # важно закрыть клиентскую сессию, чтобы не было ворнингов
+            await bot.session.close()
             return
 
+        # health endpoint для Render
         app = web.Application()
-        app.router.add_get("/health", lambda r: web.Response(text="ok"))
-        runner = web.AppRunner(app); await runner.setup()
-        site = web.TCPSite(runner, host="0.0.0.0", port=PORT); await site.start()
+        async def _health(_request):
+            return web.Response(text="ok")
+        app.router.add_get("/health", _health)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
+        await site.start()
         print(f"Polling + health on :{PORT}/health")
 
         try:
@@ -760,9 +785,9 @@ async def main():
             with contextlib.suppress(Exception):
                 await release_runtime_lock()
             with contextlib.suppress(Exception):
-                await runner.cleanup()         # <<< аккуратно гасим health
+                await runner.cleanup()
             with contextlib.suppress(Exception):
-                await bot.session.close()      # <<< убирает Unclosed client session
+                await bot.session.close()
 
 if __name__ == "__main__":
     import sys
