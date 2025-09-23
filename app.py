@@ -373,19 +373,40 @@ async def join_wishes(m: Message, state: FSMContext):
     code = data["room_code"]
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
-                me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
-         if not me:
-            count = (await s.execute(select(func.count()).select_from(Participant).where(Participant.room_id == room.id))).scalar()
+        me = (await s.execute(
+            select(Participant).where(
+                Participant.room_id == room.id,
+                Participant.user_id == m.from_user.id
+            )
+        )).scalar_one_or_none()
+
+        if not me:
+            count = (await s.execute(
+                select(func.count()).select_from(Participant).where(Participant.room_id == room.id)
+            )).scalar()
             if count >= MAX_PARTICIPANTS_PER_ROOM:
-                await state.clear(); await m.answer("Лимит участников достигнут"); return
+                await state.clear()
+                await m.answer("Лимит участников достигнут")
+                return
+
         name = data.get("name") or (me.name if me else None)
         if not name:
-            await state.clear(); await m.answer("Сначала представься", reply_markup=kb_root(False)); return
+            await state.clear()
+            await m.answer("Сначала представься", reply_markup=kb_root(False))
+            return
+
         if me:
-            me.name = name; me.wishes = (m.text or "")[:512]
+            me.name = name
+            me.wishes = (m.text or "")[:512]
         else:
-            s.add(Participant(room_id=room.id, user_id=m.from_user.id, name=name, wishes=(m.text or "")[:512]))
+            s.add(Participant(
+                room_id=room.id,
+                user_id=m.from_user.id,
+                name=name,
+                wishes=(m.text or "")[:512]
+            ))
         await s.commit()
+
     await state.clear()
     await m.answer("Записал. Но свечку всё равно подарят 😏", reply_markup=kb_root(True))
     await enter_room_menu(m, code)
@@ -466,10 +487,22 @@ async def rules_btn(m: Message):
 @dp.message(F.text == "📝 Хотелки")
 async def wishes_btn(m: Message, state: FSMContext):
     room = await get_user_active_room(m.from_user.id)
-    if not room: await m.answer("Сначала присоединись", reply_markup=kb_root(False)); return
-     async with Session() as s:
-        me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
-    if not me: await m.answer("Ты ещё не в комнате", reply_markup=kb_root(False)); return
+    if not room:
+        await m.answer("Сначала присоединись", reply_markup=kb_root(False))
+        return
+
+    async with Session() as s:
+        me = (await s.execute(
+            select(Participant).where(
+                Participant.room_id == room.id,
+                Participant.user_id == m.from_user.id
+            )
+        )).scalar_one_or_none()
+
+    if not me:
+        await m.answer("Ты ещё не в комнате", reply_markup=kb_root(False))
+        return
+
     await state.clear()
     await state.update_data(room_code=room.code, name=me.name)
     await state.set_state(Join.wishes)
@@ -478,14 +511,36 @@ async def wishes_btn(m: Message, state: FSMContext):
 @dp.message(F.text == "📨 Получатель")
 async def target_btn(m: Message):
     room = await get_user_active_room(m.from_user.id)
-    if not room: await m.answer("Сначала присоединись", reply_markup=kb_root(False)); return
-async with Session() as s:
-        me = (await s.execute(select(Participant).where(Participant.room_id == room.id, Participant.user_id == m.from_user.id))).scalar_one_or_none()
-        if not me: await m.answer("Ты ещё не в комнате", reply_markup=kb_root(False)); return
-        pair = (await s.execute(select(Pair).where(Pair.room_id == room.id, Pair.giver_id == me.id))).scalar_one_or_none()
-        if not pair: await m.answer("Жеребьёвки ещё не было", reply_markup=kb_root(True)); return
-        recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
-    await m.answer(f"Ты даришь: <b>{recv.name}</b>\nХотелки: {recv.wishes or 'не указаны'}", reply_markup=kb_root(True))
+    if not room:
+        await m.answer("Сначала присоединись", reply_markup=kb_root(False))
+        return
+
+    async with Session() as s:
+        me = (await s.execute(
+            select(Participant).where(
+                Participant.room_id == room.id,
+                Participant.user_id == m.from_user.id
+            )
+        )).scalar_one_or_none()
+        if not me:
+            await m.answer("Ты ещё не в комнате", reply_markup=kb_root(False))
+            return
+
+        pair = (await s.execute(
+            select(Pair).where(Pair.room_id == room.id, Pair.giver_id == me.id)
+        )).scalar_one_or_none()
+        if not pair:
+            await m.answer("Жеребьёвки ещё не было", reply_markup=kb_root(True))
+            return
+
+        recv = (await s.execute(
+            select(Participant).where(Participant.id == pair.receiver_id)
+        )).scalar_one()
+
+    await m.answer(
+        f"Ты даришь: <b>{recv.name}</b>\nХотелки: {recv.wishes or 'не указаны'}",
+        reply_markup=kb_root(True)
+    )
 
 @dp.callback_query(F.data.startswith("me_target:"))
 async def cb_me_target(cq: CallbackQuery):
@@ -687,9 +742,10 @@ async def main():
         info = await bot.get_webhook_info()
         if info.url: await bot.delete_webhook(drop_pending_updates=True)
 
-        got = await acquire_runtime_lock()
+               got = await acquire_runtime_lock()
         if not got:
             print("Another instance already holds the polling lock. Exiting.")
+            await bot.session.close()  # <<< важно
             return
 
         app = web.Application()
@@ -703,6 +759,10 @@ async def main():
         finally:
             with contextlib.suppress(Exception):
                 await release_runtime_lock()
+            with contextlib.suppress(Exception):
+                await runner.cleanup()         # <<< аккуратно гасим health
+            with contextlib.suppress(Exception):
+                await bot.session.close()      # <<< убирает Unclosed client session
 
 if __name__ == "__main__":
     import sys
