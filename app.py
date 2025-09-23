@@ -21,7 +21,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sqlalchemy import (
-    select, func, Integer, Boolean, ForeignKey, String as SAString, DateTime, UniqueConstraint
+    select, func, Integer, BigInteger, Boolean, ForeignKey, String as SAString, DateTime, UniqueConstraint, text
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
@@ -65,8 +65,7 @@ class Base(DeclarativeBase): pass
 class Room(Base):
     __tablename__ = "rooms"
     id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(SAString(10), unique=True, index=True)
-    owner_id: Mapped[int]
+    owner_id: Mapped[int] = mapped_column(BigInteger)
     title: Mapped[str] = mapped_column(SAString(64), default="Secret Santa")
     budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     deadline_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
@@ -81,7 +80,7 @@ class Participant(Base):
     __tablename__ = "participants"
     id: Mapped[int] = mapped_column(primary_key=True)
     room_id: Mapped[int] = mapped_column(ForeignKey("rooms.id", ondelete="CASCADE"), index=True)
-    user_id: Mapped[int] = mapped_column(index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     name: Mapped[str] = mapped_column(SAString(64))
     wishes: Mapped[str] = mapped_column(SAString(512), default="")
     joined_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
@@ -723,8 +722,41 @@ async def reminder_loop():
 # ------------------------------------------------------------
 # main
 # ------------------------------------------------------------
+async def migrate_bigints_if_needed():
+    # Только для Postgres
+    if not DATABASE_URL.startswith("postgresql+psycopg://"):
+        return
+    async with engine.begin() as conn:
+        # owner_id -> BIGINT
+        await conn.execute(text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='rooms' AND column_name='owner_id' AND data_type IN ('integer','int4')
+                ) THEN
+                    ALTER TABLE rooms ALTER COLUMN owner_id TYPE BIGINT;
+                END IF;
+            END
+            $$;
+        """))
+        # user_id -> BIGINT
+        await conn.execute(text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='participants' AND column_name='user_id' AND data_type IN ('integer','int4')
+                ) THEN
+                    ALTER TABLE participants ALTER COLUMN user_id TYPE BIGINT;
+                END IF;
+            END
+            $$;
+        """))
+
 async def main():
     await init_db()
+    await migrate_bigints_if_needed()
     asyncio.create_task(reminder_loop())
 
     if WEBHOOK_URL:
