@@ -44,6 +44,39 @@ if DATABASE_URL.startswith("postgres://"):
 elif DATABASE_URL.startswith("postgresql://") and "+psycopg" not in DATABASE_URL:
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
+def _sanitize_pg_url(url: str) -> str:
+    if not url.startswith(("postgres://", "postgresql://", "postgresql+psycopg://")):
+        return url
+    # приводи к psycopg3
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+psycopg://", 1)
+    elif url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+    parts = urlsplit(url)
+    q = dict(parse_qsl(parts.query, keep_blank_values=True))
+
+    # выкидываем несовместимые с psycopg3/pgbouncer опции
+    bad = {
+        "prepared_statement_cache_size",
+        "statement_cache_size",
+        "prepared_statements",
+        "server_prepared_statements",
+    }
+    for k in list(q):
+        if k in bad:
+            q.pop(k, None)
+
+    # для Supabase обычно нужен ssl
+    q.setdefault("sslmode", "require")
+
+    new_parts = parts._replace(query=urlencode(q))
+    return urlunsplit(new_parts)
+
+DATABASE_URL = _sanitize_pg_url(DATABASE_URL)
+
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # если задан — будет режим webhook, иначе polling
 PORT = int(os.environ.get("PORT", "10000"))
 
@@ -120,18 +153,14 @@ class RuntimeLock(Base):
 
 CONNECT_ARGS = {}
 if DATABASE_URL.startswith("postgresql+psycopg://"):
-    # Полностью вырубаем server-side prepare и кеш подготовленных запросов
-    CONNECT_ARGS.update({
-        "prepare_threshold": 0,              # не готовить на сервере
-        "prepared_statement_cache_size": 0,  # не кешировать имена prepared statements
-    })
+    CONNECT_ARGS["prepare_threshold"] = 0  # вырубить server-side prepare
 
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
     future=True,
     connect_args=CONNECT_ARGS,
-    poolclass=NullPool,   # без пула: каждый запрос — свой коннект (надёжно с pgbouncer transaction)
+    poolclass=NullPool,  # безопасно при PgBouncer (transaction mode)
 )
 
 async def init_db():
