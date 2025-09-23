@@ -26,6 +26,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.pool import NullPool
+
 
 # ------------------------------------------------------------
 # ENV
@@ -118,10 +120,19 @@ class RuntimeLock(Base):
 
 CONNECT_ARGS = {}
 if DATABASE_URL.startswith("postgresql+psycopg://"):
-    CONNECT_ARGS["prepare_threshold"] = 0  # защита от DuplicatePreparedStatement
+    # Полностью вырубаем server-side prepare и кеш подготовленных запросов
+    CONNECT_ARGS.update({
+        "prepare_threshold": 0,              # не готовить на сервере
+        "prepared_statement_cache_size": 0,  # не кешировать имена prepared statements
+    })
 
-engine = create_async_engine(DATABASE_URL, echo=False, future=True, connect_args=CONNECT_ARGS)
-Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    future=True,
+    connect_args=CONNECT_ARGS,
+    poolclass=NullPool,   # без пула: каждый запрос — свой коннект (надёжно с pgbouncer transaction)
+)
 
 async def init_db():
     async with engine.begin() as conn:
