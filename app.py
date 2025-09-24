@@ -141,6 +141,13 @@ class RuntimeLock(Base):
     bot_token_hash: Mapped[str] = mapped_column(SAString(64), unique=True, index=True)
     started_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
 
+class Referral(Base):
+    __tablename__ = "referrals"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    referrer_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    referee_user_id: Mapped[int] = mapped_column(BigInteger, index=True, unique=True)  # один раз кем-то приглашён
+    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
+
 # ============================================================
 # Engine / Session (расположить ДО функций, где используется Session)
 # ============================================================
@@ -214,10 +221,19 @@ def wishes_to_query(wishes: str, budget_max: Optional[int], letter: Optional[str
     if letter: parts.append(f"на букву {letter}")
     return ", ".join(parts) or "подарок сюрприз"
 
-def mk_aff_url(marketplace: str, query: str) -> Optional[str]:
+def mk_aff_url(marketplace: str, query: str, room_code: str | None = None, user_id: int | None = None) -> Optional[str]:
     tpl = AFF_TEMPLATES.get(marketplace)
-    if not tpl: return None
-    return tpl.replace("{q}", urllib.parse.quote_plus(query.strip()))
+    if not tpl:
+        return None
+    base = tpl.replace("{q}", urllib.parse.quote_plus(query.strip()))
+    utm = {
+        "utm_source": "santa_bot",
+        "utm_medium": "room" if room_code else "menu",
+        "utm_campaign": room_code or "none",
+        "utm_content": str(user_id or 0),
+    }
+    sep = "&" if "?" in base else "?"
+    return base + sep + urllib.parse.urlencode(utm)
 
 def draw_pairs(ids: List[int], forbidden: Set[Tuple[int, int]]) -> Optional[List[Tuple[int, int]]]:
     n = len(ids)
@@ -273,6 +289,26 @@ async def get_user_active_room(user_id: int) -> Optional[Room]:
         )).scalar_one_or_none()
         if not p: return None
         return (await s.execute(select(Room).where(Room.id == p.room_id))).scalar_one_or_none()
+
+async def record_referral_if_first(ref_payload: str, referee_user_id: int) -> None:
+    # ожидаем payload вида 'ref_123456789'
+    if not ref_payload.startswith("ref_"):
+        return
+    try:
+        referrer = int(ref_payload[4:])
+    except ValueError:
+        return
+    if referrer <= 0 or referrer == referee_user_id:
+        return
+    async with Session() as s:
+        # если этот referee уже кем-то отмечен — не перезаписываем
+        exists = (await s.execute(
+            select(Referral).where(Referral.referee_user_id == referee_user_id)
+        )).scalar_one_or_none()
+        if exists:
+            return
+        s.add(Referral(referrer_user_id=referrer, referee_user_id=referee_user_id))
+        await s.commit()
 
 # ============================================================
 # Runtime lock (single-instance polling)
@@ -386,10 +422,29 @@ async def cb_to_main(cq: CallbackQuery, state: FSMContext):
 async def on_cmd_start(m: Message, state: FSMContext):
     await state.clear()
     payload = m.text.split(maxsplit=1)[1] if len(m.text.split()) > 1 else ""
+
+    # deep-link: комната
     if payload.startswith("room_"):
         await enter_room_menu(m, payload.removeprefix("room_"))
         return
+
+    # deep-link: реферал
+    if payload.startswith("ref_"):
+        await record_referral_if_first(payload, m.from_user.id)
+
     await show_main(m)
+
+# реферал
+@dp.message(F.text == "👤 Профиль")
+async def profile(m: Message):
+    me = await bot.get_me()
+    ref_link = f"https://t.me/{me.username}?start=ref_{m.from_user.id}"
+    await m.answer(
+        "Твоя реф-ссылка:\n"
+        f"{ref_link}\n\n"
+        "За приглашения можно получить PRO-фичи и бонусы.",
+        reply_markup=kb_root(bool(await get_user_active_room(m.from_user.id)))
+    )
 
 # Создать комнату
 @dp.message(F.text == "➕ Создать комнату")
@@ -793,7 +848,7 @@ async def cb_ideas(cq: CallbackQuery):
     await send_single(cq, f"🎁 Идеи для <b>{recv.name}</b> по запросу: <i>{q}</i>\nЖми «🛒 Купить».", main_kb(code, room.owner_id == cq.from_user.id))
 
 @dp.callback_query(F.data.startswith("buy:"))
-async def cb_buy(cq: CallbackQuery):
+async def cb_buy(cq: CallbackQuery, state: FSMContext):
     code = cq.data.split(":", 1)[1]
     async with Session() as s:
         room = (await s.execute(select(Room).where(Room.code == code))).scalar_one()
@@ -807,17 +862,56 @@ async def cb_buy(cq: CallbackQuery):
             await cq.answer("Жеребьёвки ещё не было", show_alert=True)
             return
         recv = (await s.execute(select(Participant).where(Participant.id == pair.receiver_id))).scalar_one()
-    q = wishes_to_query(recv.wishes, room.rule_amount_max or room.rule_amount_exact, room.rule_letter)
+
+    # подставляем пользовательский запрос, если есть (если ты уже добавлял BuyPref — ок; если нет, просто закомментируй 3 строки ниже)
+    try:
+        bp = await get_or_create_buypref(room.id, cq.from_user.id)  # noqa: F821 (должен быть из твоих прошлых правок)
+        base_q = bp.custom_query or wishes_to_query(
+            recv.wishes, room.rule_amount_max or room.rule_amount_exact, room.rule_letter
+        )
+        preferred = getattr(bp, "preferred_market", None)
+    except NameError:
+        bp = None
+        base_q = wishes_to_query(recv.wishes, room.rule_amount_max or room.rule_amount_exact, room.rule_letter)
+        preferred = None
+
     if not AFF_TEMPLATES:
         await send_single(cq, "Партнёрские магазины не настроены (ENV AFFILIATES_JSON).", main_kb(code, room.owner_id == cq.from_user.id))
         return
+
     kb = InlineKeyboardBuilder()
-    for mk, tpl in list(AFF_TEMPLATES.items())[:6]:
-        url = mk_aff_url(mk, q)
+    # Сначала — «любимый» маркет, если выбран
+    ordered = list(AFF_TEMPLATES.items())
+    if preferred and preferred in AFF_TEMPLATES:
+        ordered = [(preferred, AFF_TEMPLATES[preferred])] + [(k, v) for k, v in AFF_TEMPLATES.items() if k != preferred]
+
+    added = 0
+    for mk, tpl in ordered:
+        url = mk_aff_url(mk, base_q, room_code=code, user_id=cq.from_user.id)
         if url:
-            kb.button(text=f"Перейти в {HUMAN_NAMES.get(mk, mk)}", url=url)
+            title = HUMAN_NAMES.get(mk, mk)
+            star = " ⭐" if preferred == mk else ""
+            kb.button(text=f"{title}{star}", url=url)
+            added += 1
+        if added >= 6:
+            break
+
+    # управление (если есть BuyPref)
+    if bp is not None:
+        kb.button(text="✏️ Изменить запрос", callback_data=f"buy_editq:{code}")
+        if "wb" in AFF_TEMPLATES: kb.button(text="⭐ По умолчанию WB", callback_data=f"buy_pref:wb:{code}")
+        if "ozon" in AFF_TEMPLATES: kb.button(text="⭐ По умолчанию Ozon", callback_data=f"buy_pref:ozon:{code}")
+        if "ym" in AFF_TEMPLATES: kb.button(text="⭐ По умолчанию Я.Маркет", callback_data=f"buy_pref:ym:{code}")
+
     kb.button(text="↩️ Назад", callback_data=f"room_open:{code}")
-    await send_single(cq, f"🛒 Поиск: <i>{q}</i>\nВыбери магазин:", kb.as_markup())
+    kb.adjust(1)
+
+    text = (
+        f"🛒 Поиск: <i>{base_q}</i>\n"
+        f"Выбери магазин или измени запрос.\n\n"
+        f"<i>Ссылки могут быть партнёрскими. Покупая, вы поддерживаете бота — для вас цена не меняется.</i>"
+    )
+    await send_single(cq, text, kb.as_markup())
 
 # Выход
 @dp.message(F.text == "🚪 Выйти из комнаты")
