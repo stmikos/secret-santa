@@ -146,7 +146,9 @@ class RuntimeLock(Base):
 # ============================================================
 CONNECT_ARGS: Dict[str, object] = {}
 if DATABASE_URL.startswith("postgresql+psycopg://"):
-    CONNECT_ARGS["prepare_threshold"] = 0  # PgBouncer-friendly
+    # Disable server-side prepared statements so PgBouncer in transaction
+    # pooling mode doesn't invalidate cached statements between requests.
+    CONNECT_ARGS["prepare_threshold"] = None
 
 engine = create_async_engine(
     DATABASE_URL,
