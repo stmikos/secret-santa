@@ -192,14 +192,19 @@ def gen_code(n: int = 6) -> str:
     import secrets
     alphabet = string.ascii_uppercase + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(n))
-
+   
 def mk_rules(room: Room) -> str:
-    rows = ["Правила комнаты:"]
-    if room.rule_letter: rows.append(f"• Подарок на букву: <b>{room.rule_letter}</b>")
-    if room.rule_amount_exact: rows.append(f"• Сумма ровно: <b>{room.rule_amount_exact}₽</b>")
-    if room.rule_amount_max: rows.append(f"• Сумма максимум: <b>{room.rule_amount_max}₽</b>")
-    rows.append(f"Бюджет: <b>{room.budget or '—'}</b>")
-    rows.append(f"Дедлайн: <b>{room.deadline_at.date() if room.deadline_at else '—'}</b>")
+    rows = ["Параметры комнаты:"]
+    if room.rule_letter:
+        rows.append(f"• Буква подарка: <b>{room.rule_letter}</b>")
+    if room.rule_amount_exact:
+        rows.append(f"• Сумма ровно: <b>{room.rule_amount_exact}₽</b>")
+    if room.rule_amount_max:
+        rows.append(f"• Сумма максимум: <b>{room.rule_amount_max}₽</b>")
+    if room.budget:
+        rows.append(f"• Бюджет: <b>{room.budget}₽</b>")
+    if room.deadline_at:
+        rows.append(f"• Дедлайн: <b>{room.deadline_at.date()}</b>")
     return "\n".join(rows)
 
 def wishes_to_query(wishes: str, budget_max: Optional[int], letter: Optional[str]) -> str:
@@ -529,18 +534,21 @@ async def cb_participants(cq: CallbackQuery):
 
 # Правила / Новости
 GENERAL_RULES = (
-    "Правила игры:\n"
-    "• Не раскрывай, кому даришь, до обмена 🎅\n"
-    "• Уважай хотелки и табу получателя ✅\n"
-    "• Соблюдай дедлайн ⏰\n"
-    "• Дарим эмоции, а не аргументы из бухгалтерии 🙂"
+    "Правила комнаты 🎁\n"
+    "• Дарим подарок только своему получателю.\n"
+    "• Не раскрываем, кто кому дарит, до обмена.\n"
+    "• Соблюдаем бюджет и дедлайн.\n"
+    "• Учитываем хотелки и табу получателя.\n"
+    "• Подсказки — только через бота (анонимно)."
 )
 
 @dp.message(F.text == "ℹ️ Правила")
 async def rules_btn(m: Message):
     room = await get_user_active_room(m.from_user.id)
     if room:
-        await m.answer(mk_rules(room), reply_markup=kb_root(True))
+        # короткие правила + динамические параметры комнаты
+        text = SHORT_ROOM_RULES + "\n\n" + mk_rules(room)
+        await m.answer(text, reply_markup=kb_root(True))
     else:
         await m.answer(GENERAL_RULES, reply_markup=kb_root(False))
 
