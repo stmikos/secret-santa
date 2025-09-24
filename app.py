@@ -4,7 +4,6 @@
 import os
 import re
 import asyncio
-import random
 import string
 import hashlib
 import contextlib
@@ -213,32 +212,50 @@ def mk_aff_url(marketplace: str, query: str) -> Optional[str]:
     if not tpl: return None
     return tpl.replace("{q}", urllib.parse.quote_plus(query.strip()))
 
-def draw_pairs(ids: List[int], forbidden: Set[Tuple[int, int]]) -> List[Tuple[int, int]]:
+def draw_pairs(ids: List[int], forbidden: Set[Tuple[int, int]]) -> Optional[List[Tuple[int, int]]]:
     n = len(ids)
-    if n < 2: raise ValueError("Need >=2 participants")
-    receivers = ids[:]
-    random.shuffle(receivers)
-    assigned: Dict[int, int] = {}
+    if n < 2:
+        raise ValueError("Need >=2 participants")
 
-    def backtrack(i: int) -> bool:
-        if i == n: return True
-        giver = ids[i]
-        random.shuffle(receivers)
-        for r in receivers:
-            if r == giver: continue
-            if (giver, r) in forbidden: continue
-            if r in assigned.values(): continue
-            assigned[giver] = r
-            if backtrack(i + 1): return True
-            assigned.pop(giver, None)
+    forbidden_set = set(forbidden)
+
+    rotation = list(zip(ids, ids[1:] + ids[:1]))
+    if all((giver, receiver) not in forbidden_set for giver, receiver in rotation):
+        return rotation
+    adjacency: List[List[int]] = []
+    for giver in ids:
+        options = [r for r in ids if r != giver and (giver, r) not in forbidden_set]
+        options.sort()
+        if not options:
+            return None
+        adjacency.append(options)
+
+    match_r: Dict[int, int] = {}
+    giver_to_receiver: List[Optional[int]] = [None] * n
+
+    def dfs(i: int, seen: Set[int]) -> bool:
+        for receiver in adjacency[i]:
+            if receiver in seen:
+                continue
+            seen.add(receiver)
+            current = match_r.get(receiver)
+            if current is None or dfs(current, seen):
+                match_r[receiver] = i
+                giver_to_receiver[i] = receiver
+                return True
         return False
 
-    if not backtrack(0):
-        rot = list(zip(ids, ids[1:] + ids[:1]))
-        if any(g == r or (g, r) in forbidden for g, r in rot):
-            raise RuntimeError("Constraints too strict")
-        return rot
-    return list(assigned.items())
+    for i in range(n):
+        if not dfs(i, set()):
+            return None
+
+    result: List[Tuple[int, int]] = []
+    for i, giver in enumerate(ids):
+        receiver = giver_to_receiver[i]
+        if receiver is None:
+            return None
+        result.append((giver, receiver))
+    return result
 
 async def get_user_active_room(user_id: int) -> Optional[Room]:
     async with Session() as s:
@@ -651,8 +668,12 @@ async def cb_draw(cq: CallbackQuery):
         forb = {(fp.giver_id, fp.receiver_id) for fp in (await s.execute(
             select(ForbiddenPair).where(ForbiddenPair.room_id == room.id)
         )).scalars().all()}
+        participant_ids = [p.id for p in parts]
+        pairs = draw_pairs(participant_ids, forb)
+        if not pairs:
+            await cq.answer("Не удалось провести жеребьёвку. Проверь ограничения.", show_alert=True)
+            return
         await s.execute(Pair.__table__.delete().where(Pair.room_id == room.id))
-        pairs = draw_pairs([p.id for p in parts], forb)
         s.add_all([Pair(room_id=room.id, giver_id=g, receiver_id=r) for g, r in pairs])
         room.drawn = True
         await s.commit()
